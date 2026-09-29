@@ -17,7 +17,7 @@ from typing import Any
 
 MAX_GROUP_ADDRESSES = 65535
 MAX_ENTITIES = 2000
-MAPPER_REVISION = 7
+MAPPER_REVISION = 8
 
 # role: (YAML field, allowed exact DPTs). Names here are semantic roles, not GA
 # names. Standard ETS roles include AbsoluteSetvalueControl/ActualDimmingValue.
@@ -53,6 +53,20 @@ ROLE_FIELDS = {
     "fanspeed": ("fan_speed_address", {(5, 1)}),
     "fanspeedstate": ("fan_speed_state_address", {(5, 1)}),
     "scene": ("address", {(17, 1), (18, 1)}),
+    "impulseopen": ("open_impulse_address", {(1, 1)}),
+    "impulseclose": ("close_impulse_address", {(1, 1)}),
+    "impulsestop": ("stop_impulse_address", {(1, 1)}),
+}
+
+# A dry-contact curtain on a relay actuator in "switch impulse" mode (REXLiTE
+# KNX Contract, CurtainImpulse): open, close and stop are three separate relay
+# channels that each only react to a 1. HA's KNX cover writes 0/1 on one
+# up/down address and cannot drive that, so each becomes a KNX button sending 1.
+# There is no position feedback to model, so no cover entity is invented.
+IMPULSE_BUTTONS = {
+    "open_impulse_address": "開",
+    "close_impulse_address": "關",
+    "stop_impulse_address": "停",
 }
 
 # Longest suffix wins. A separator and a non-empty exact prefix are required.
@@ -68,6 +82,9 @@ ROLE_FIELDS = {
 # Chinese "指令"/"亮度指令") is the other common English convention alongside
 # "開關"/"狀態"; a role datapoint-type mismatch still blocks the whole prefix.
 NAME_ROLES = {
+    "開脈衝": "impulseopen",
+    "關脈衝": "impulseclose",
+    "停脈衝": "impulsestop",
     "色溫狀態": "colortemperaturestate",
     "色溫": "colortemperature",
     "葉片角度狀態": "currentabsolutepositionslatpercentage",
@@ -796,6 +813,22 @@ class _Planner:
             self.blocked.update(mentioned)
             for address in mentioned:
                 self.issues.setdefault(address, error)
+            return
+        if impulse := fields.keys() & IMPULSE_BUTTONS.keys():
+            if fields.keys() != IMPULSE_BUTTONS.keys():
+                # A partial set (or one mixed with other roles) cannot move a
+                # curtain both ways and stop it; say so rather than guess.
+                self.blocked.update(mentioned)
+                for address in mentioned:
+                    self.issues.setdefault(address, "incompatible_function_roles")
+                return
+            for field in sorted(impulse, key=list(IMPULSE_BUTTONS).index):
+                self._add(
+                    "button",
+                    f"{name} {IMPULSE_BUTTONS[field]}",
+                    {"address": fields[field]},
+                    source,
+                )
             return
         platform = None
         kind = _semantic(kind)

@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- KNX mapper (`MAPPER_REVISION` 8): REXLiTE KNX Contract `CurtainImpulse` —
+  a dry-contact curtain on a relay actuator in "switch impulse" mode. A Function
+  whose members are the `開脈衝`/`關脈衝`/`停脈衝` addresses (DPT 1.001, no
+  standard ETS role) becomes three KNX `button` entities (`{name} 開/關/停`, each
+  sending 1). HA's KNX cover cannot drive it (it writes 0/1 on one up/down
+  address); a partial set is rejected as `incompatible_function_roles`.
+- Deployment accepts the `button` platform (identity: `address`).
+
 ## 0.1.21
 
 - Read Deco tracker values with live HA report timestamps so unchanged online nodes and zero-traffic clients do not incorrectly expire.

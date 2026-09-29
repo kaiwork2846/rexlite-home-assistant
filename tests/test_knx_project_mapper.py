@@ -204,6 +204,15 @@ CONTRACT_V1_LOOPS = [
         ],
     ),
     (
+        "FT-7",
+        "2F-主臥-窗簾1",
+        [
+            ("開脈衝", (1, 1), "", False),
+            ("關脈衝", (1, 1), "", False),
+            ("停脈衝", (1, 1), "", False),
+        ],
+    ),
+    (
         "FT-0",
         "1F-客廳-冷氣1",
         [
@@ -922,8 +931,10 @@ class KNXProjectMappingTests(unittest.TestCase):
         p, table = contract_v1_project()
         result = mapper.plan_project(p)
         by_name = {e["name"]: e for e in result["entities"]}
+        # The dry-contact curtain is three buttons, not one entity; checked below.
+        loops = [loop for loop in CONTRACT_V1_LOOPS if loop[1] != "2F-主臥-窗簾1"]
         self.assertEqual(
-            {name: by_name[name]["platform"] for _, name, _ in CONTRACT_V1_LOOPS},
+            {name: by_name[name]["platform"] for _, name, _ in loops},
             {
                 "1F-玄關-崁燈1": "light",
                 "1F-客廳-吊燈1": "light",
@@ -937,10 +948,23 @@ class KNXProjectMappingTests(unittest.TestCase):
             },
         )
         self.assertTrue(
-            all(
-                by_name[name]["source"] == "ets-function-role"
-                for _, name, _ in CONTRACT_V1_LOOPS
-            )
+            all(by_name[name]["source"] == "ets-function-role" for _, name, _ in loops)
+        )
+        buttons = {row["name"]: row for row in result["config"]["button"]}
+        self.assertEqual(
+            buttons,
+            {
+                f"2F-主臥-窗簾1 {label}": {
+                    "name": f"2F-主臥-窗簾1 {label}",
+                    "unique_id": by_name[f"2F-主臥-窗簾1 {label}"]["uniqueId"],
+                    "address": table[("2F-主臥-窗簾1", suffix)],
+                }
+                for label, suffix in (
+                    ("開", "開脈衝"),
+                    ("關", "關脈衝"),
+                    ("停", "停脈衝"),
+                )
+            },
         )
         # Only the deliberately non-entity relative-dimming address is left.
         self.assertEqual(
@@ -981,6 +1005,24 @@ class KNXProjectMappingTests(unittest.TestCase):
         )
         sensors = {row["name"] for row in result["config"]["sensor"]}
         self.assertLessEqual({"1F-客廳-感測器 溫度", "1F-客廳-感測器 照度"}, sensors)
+
+    def test_partial_impulse_curtain_is_rejected_not_guessed(self):
+        p, table = contract_v1_project()
+        stop = table[("2F-主臥-窗簾1", "停脈衝")]
+        function = next(
+            f for f in p["functions"].values() if f["name"] == "2F-主臥-窗簾1"
+        )
+        del function["group_addresses"][stop]
+        del p["group_addresses"][stop]
+        result = mapper.plan_project(p)
+        self.assertNotIn("button", result["config"])
+        self.assertIn(
+            {
+                "address": table[("2F-主臥-窗簾1", "開脈衝")],
+                "reason": "incompatible_function_roles",
+            },
+            result["skipped"],
+        )
 
     def test_function_member_name_must_share_the_function_prefix(self):
         p, table = contract_v1_project()
@@ -1318,7 +1360,16 @@ print(json.dumps(sorted(validated)))
         self.assertEqual(process.returncode, 0, process.stderr)
         self.assertEqual(
             set(json.loads(process.stdout)),
-            {"light", "cover", "sensor", "climate", "scene", "switch", "binary_sensor"},
+            {
+                "light",
+                "cover",
+                "sensor",
+                "climate",
+                "scene",
+                "switch",
+                "binary_sensor",
+                "button",
+            },
         )
 
     def test_entity_limit_rejects_without_partial_silent_truncation(self):

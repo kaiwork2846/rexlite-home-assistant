@@ -331,7 +331,7 @@ def row_identity(
         canonical = _address(str(value)) if value is not None else None
         return format_native_identity(canonical, address_format) if canonical else None
 
-    if platform in ("light", "switch"):
+    if platform in ("light", "switch", "button"):
         return primary("address")
     if platform in ("sensor", "binary_sensor"):
         return primary("state_address")
@@ -542,6 +542,7 @@ def manual_yaml_plan(source: str) -> dict:
     platforms = {
         "light",
         "switch",
+        "button",
         "scene",
         "sensor",
         "binary_sensor",
