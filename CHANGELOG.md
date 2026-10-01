@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.22
 
 - KNX mapper (`MAPPER_REVISION` 8): REXLiTE KNX Contract `CurtainImpulse` —
   a dry-contact curtain on a relay actuator in "switch impulse" mode. A Function
@@ -9,6 +9,13 @@
   sending 1). HA's KNX cover cannot drive it (it writes 0/1 on one up/down
   address); a partial set is rejected as `incompatible_function_roles`.
 - Deployment accepts the `button` platform (identity: `address`).
+- Add administrator-only `rexlite/knx/gateway_scan`: a three-second KNXnet/IP
+  search (xknx `GatewayScanner`) that lists interfaces and routers with their
+  tunnelling/routing capabilities without starting HA's KNX config flow.
+- 新增 Node-RED RS-485 橋接部署（`rexlite/nodered/*`，僅限管理員）：自動找到 HA 的 Node-RED add-on（經 Supervisor ingress，免輸入帳密），或使用指定網址與帳號；可一鍵啟動已停止的 add-on。
+- 由主機直接掃描 RS-485 閘道：Somfy SDN 廣播 GET_NODE_ADDR 找出馬達並讀取名稱與位置；日立冷氣經 Modbus TCP 逐一詢問站號。支援以開／停／關辨識窗簾。
+- 部署只接受平台產生的單一閘道分頁（節點類型、閘道 IP、MQTT Topic 皆受限制），以 Admin API v2 rev 合併，不影響案場其他流程；缺少的 `node-red-contrib-modbus` 會自動安裝。
+- MQTT Broker 帳密在主機端由 HA 的 MQTT 設定填入，不經雲端；部署後以流程的 MQTT 心跳確認 Node-RED 與閘道皆已連線。
 
 ## 0.1.21
 

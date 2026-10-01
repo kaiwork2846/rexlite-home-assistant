@@ -41,8 +41,10 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     from .device_discovery import register_device_discovery
     from .knx_project_deployment import register_websocket_commands
     from .network_traffic_api import async_register_network_traffic
+    from .node_red_bridge import register_node_red_bridge
 
     register_device_discovery(hass)
+    register_node_red_bridge(hass)
     deployer = register_websocket_commands(hass)
     await async_register_network_traffic(hass)
 
