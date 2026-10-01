@@ -19,7 +19,7 @@ DEFAULT_HOME_ASSISTANT_URL: Final = "http://127.0.0.1:8123"
 DEFAULT_REMOTE_ADMIN_ENABLED: Final = False
 
 PLATFORMS: Final = [Platform.SENSOR, Platform.BINARY_SENSOR, Platform.SWITCH]
-INTEGRATION_VERSION: Final = "0.1.22"
+INTEGRATION_VERSION: Final = "0.1.23"
 
 ATTR_ACCESS_MODE: Final = "access_mode"
 ATTR_GATEWAY_URL: Final = "gateway_url"

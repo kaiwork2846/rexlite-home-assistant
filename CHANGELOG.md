@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.23
+
+- Declare `mqtt` in `after_dependencies` for the Node-RED bridge heartbeat check (hassfest). MQTT remains optional; no behaviour change.
+
 ## 0.1.22
 
 - KNX mapper (`MAPPER_REVISION` 8): REXLiTE KNX Contract `CurtainImpulse` —
