@@ -60,7 +60,7 @@ async def main() -> None:
         hass = HomeAssistant(directory)
         deployer = m.register_websocket_commands(hass)
         assert m.register_websocket_commands(hass) is deployer
-        assert len(hass.data["websocket_api"]) == 6
+        assert len(hass.data["websocket_api"]) == 7
         admin = User(name="Test administrator", perm_lookup=None, is_owner=True)
         viewer = User(name="Test viewer", perm_lookup=None)
         responses = asyncio.Queue()
@@ -206,6 +206,37 @@ async def main() -> None:
             deployer, "process_project", AsyncMock(return_value={"ok": True})
         ):
             assert (await request("process_project", fields))["result"] == {"ok": True}
+
+        # The gateway scan is admin-only too; isolate it from the host network.
+        class Scanner:
+            def __init__(self, xknx, **options):
+                assert options == {"stop_on_found": 0, "timeout_in_seconds": 3}
+
+            async def scan(self):
+                return [
+                    types.SimpleNamespace(
+                        name="Router",
+                        ip_addr="192.0.2.10",
+                        port=3671,
+                        individual_address=None,
+                        supports_tunnelling=True,
+                        supports_tunnelling_tcp=False,
+                        supports_routing=True,
+                        tunnelling_requires_secure=None,
+                        routing_requires_secure=None,
+                    )
+                ]
+
+        scan_module = sys.modules[package.__name__ + ".knx_gateway_scan"]
+        with patch.object(scan_module, "_scanner_types", lambda: (object, Scanner)):
+            connection.user = viewer
+            response = await request("gateway_scan", {})
+            assert response["error"]["code"] == "unauthorized", response
+            connection.user = admin
+            response = await request("gateway_scan", {})
+            assert response["success"], response
+            assert response["result"][0]["ip"] == "192.0.2.10", response
+            assert response["result"][0]["tunnellingRequiresSecure"] is False
 
         connection.async_handle_close()
         await hass.async_stop(force=True)

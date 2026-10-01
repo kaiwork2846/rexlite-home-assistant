@@ -710,6 +710,7 @@ class ProjectDeployer:
     ) -> dict:
         from homeassistant.components.file_upload import process_uploaded_file
         from xknxproject import XKNXProj
+        from xknxproject.exceptions import InvalidPasswordException
 
         from .knx_project_metadata import enrich_project
 
@@ -736,9 +737,18 @@ class ProjectDeployer:
         with uploaded_file as path:
             if file_fingerprint(path) != fingerprint:
                 raise DeploymentError("project_file_fingerprint_mismatch")
-            project = XKNXProj(
-                path, password=password, language=hass.config.language
-            ).parse()
+            try:
+                project = XKNXProj(
+                    path, password=password, language=hass.config.language
+                ).parse()
+            except InvalidPasswordException as err:
+                # xknxproject raises one error for a missing and a wrong password;
+                # the operator fixes them differently, so report them apart.
+                raise DeploymentError(
+                    "project_password_invalid"
+                    if password
+                    else "project_password_required"
+                ) from err
             project = enrich_project(project, path, password=password)
             if file_fingerprint(path) != fingerprint:
                 raise DeploymentError("project_file_changed_during_parse")
@@ -1594,6 +1604,7 @@ def register_websocket_commands(hass: Any) -> ProjectDeployer:
     deployer = ProjectDeployer(hass)
     hass.data[DATA_KEY] = deployer
 
+    from .knx_gateway_scan import GatewayScanUnavailable, scan_gateways
     from .knx_project_upload import DATA_KEY as UPLOAD_KEY
     from .knx_project_upload import ProjectUploads
 
@@ -1638,6 +1649,23 @@ def register_websocket_commands(hass: Any) -> ProjectDeployer:
     @websocket_api.async_response
     async def capabilities(hass: Any, connection: Any, msg: dict) -> None:
         connection.send_result(msg["id"], await deployer.capabilities())
+
+    @websocket_api.websocket_command({vol.Required("type"): "rexlite/knx/gateway_scan"})
+    @websocket_api.require_admin
+    @websocket_api.async_response
+    async def gateway_scan(hass: Any, connection: Any, msg: dict) -> None:
+        try:
+            result = await scan_gateways(hass)
+        except GatewayScanUnavailable:
+            connection.send_error(
+                msg["id"], "gateway_scan_unavailable", "knx_library_unavailable"
+            )
+        except Exception:
+            connection.send_error(
+                msg["id"], "gateway_scan_failed", "gateway_scan_failed"
+            )
+        else:
+            connection.send_result(msg["id"], result)
 
     @websocket_api.websocket_command(
         {
@@ -1721,7 +1749,15 @@ def register_websocket_commands(hass: Any) -> ProjectDeployer:
         )
         connection.send_result(msg["id"], await asyncio.shield(task))
 
-    for command in (capabilities, process, deploy, status, manual, upload):
+    for command in (
+        capabilities,
+        gateway_scan,
+        process,
+        deploy,
+        status,
+        manual,
+        upload,
+    ):
         websocket_api.async_register_command(hass, command)
 
     return deployer

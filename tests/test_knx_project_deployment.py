@@ -54,6 +54,14 @@ PLAN = {
 FINGERPRINT = "a" * 64
 
 
+class InvalidPasswordException(Exception):
+    """Stand-in for xknxproject's missing or wrong password error."""
+
+
+parser_errors = types.ModuleType("xknxproject.exceptions")
+parser_errors.InvalidPasswordException = InvalidPasswordException
+
+
 def load_file(path: Path) -> dict:
     class Loader(yaml.SafeLoader):
         pass
@@ -1015,7 +1023,7 @@ class DeploymentTests(unittest.IsolatedAsyncioTestCase):
             m.register_websocket_commands(self.hass)
             m.register_websocket_commands(self.hass)
         self.addCleanup(self.hass.data["rexlite_knx_uploads"].close)
-        self.assertEqual(len(handlers), 6)
+        self.assertEqual(len(handlers), 7)
         for handler in handlers:
             with self.assertRaises(PermissionError):
                 await handler(self.hass, Connection(), {"id": 1})
@@ -1386,6 +1394,7 @@ class DeploymentTests(unittest.IsolatedAsyncioTestCase):
                 {
                     "homeassistant.components.file_upload": upload_api,
                     "xknxproject": parser_api,
+                    "xknxproject.exceptions": parser_errors,
                 },
             ),
             self.assertRaisesRegex(m.DeploymentError, "fingerprint_mismatch"),
@@ -1417,11 +1426,82 @@ class DeploymentTests(unittest.IsolatedAsyncioTestCase):
                 {
                     "homeassistant.components.file_upload": upload_api,
                     "xknxproject": parser_api,
+                    "xknxproject.exceptions": parser_errors,
                 },
             ),
             self.assertRaisesRegex(m.DeploymentError, "changed_during_parse"),
         ):
             self.writer._parse_uploaded_project(self.hass, "file-id", "", m.digest(raw))
+
+    async def test_project_password_failures_are_reported_apart(self):
+        upload = self.root / "upload.knxproj"
+        raw = b"protected uploaded bytes"
+        upload.write_bytes(raw)
+        self.hass.config.language = "en"
+
+        @contextmanager
+        def uploaded_file(hass, file_id):
+            yield upload
+
+        upload_api = types.ModuleType("homeassistant.components.file_upload")
+        upload_api.process_uploaded_file = uploaded_file
+        # xknxproject uses one exception type for both cases.
+        for password, failure, expected in (
+            ("", "Password required.", "project_password_required"),
+            ("wrong", "Invalid password.", "project_password_invalid"),
+        ):
+            parse = Mock(side_effect=InvalidPasswordException(failure))
+            parser_api = types.ModuleType("xknxproject")
+            parser_api.XKNXProj = Mock(return_value=types.SimpleNamespace(parse=parse))
+            with (
+                self.subTest(expected),
+                patch.dict(
+                    sys.modules,
+                    {
+                        "homeassistant.components.file_upload": upload_api,
+                        "xknxproject": parser_api,
+                        "xknxproject.exceptions": parser_errors,
+                    },
+                ),
+                self.assertRaisesRegex(m.DeploymentError, f"^{expected}$"),
+            ):
+                self.writer._parse_uploaded_project(
+                    self.hass, "file-id", password, m.digest(raw)
+                )
+            parser_api.XKNXProj.assert_called_once_with(
+                upload, password=password, language="en"
+            )
+
+    async def test_other_parser_failures_are_not_reported_as_password(self):
+        upload = self.root / "upload.knxproj"
+        raw = b"corrupt uploaded bytes"
+        upload.write_bytes(raw)
+        self.hass.config.language = "en"
+
+        @contextmanager
+        def uploaded_file(hass, file_id):
+            yield upload
+
+        upload_api = types.ModuleType("homeassistant.components.file_upload")
+        upload_api.process_uploaded_file = uploaded_file
+        parse = Mock(side_effect=ValueError("unexpected project content"))
+        parser_api = types.ModuleType("xknxproject")
+        parser_api.XKNXProj = Mock(return_value=types.SimpleNamespace(parse=parse))
+        with (
+            patch.dict(
+                sys.modules,
+                {
+                    "homeassistant.components.file_upload": upload_api,
+                    "xknxproject": parser_api,
+                    "xknxproject.exceptions": parser_errors,
+                },
+            ),
+            # The websocket handler maps this to the generic project_parse_failed.
+            self.assertRaises(ValueError),
+        ):
+            self.writer._parse_uploaded_project(
+                self.hass, "file-id", "secret", m.digest(raw)
+            )
 
 
 if __name__ == "__main__":

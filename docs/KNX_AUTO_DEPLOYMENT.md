@@ -66,6 +66,15 @@ All four WebSocket commands are administrator-only. The status command
 `rexlite/knx/project_deployment_status` accepts an optional fingerprint. It does
 not treat an existing generated file or stale states as proof of deployment.
 
+`rexlite/knx/gateway_scan` (also administrator-only) runs a three-second
+KNXnet/IP search with xknx's `GatewayScanner` and returns every interface and
+router that answers: `name`, `ip`, `port`, `individualAddress`,
+`supportsTunnelling`, `supportsTunnellingTcp`, `supportsRouting`,
+`tunnellingRequiresSecure` and `routingRequiresSecure`. It does not start HA's KNX
+config flow, so it works whether or not KNX is configured and changes nothing.
+Errors are `gateway_scan_unavailable` (xknx cannot be imported) and
+`gateway_scan_failed`.
+
 ## Configuration ownership
 
 The reserved package is `rexlite_knx_auto`; generated YAML and transactional
