@@ -17,7 +17,7 @@ from typing import Any
 
 MAX_GROUP_ADDRESSES = 65535
 MAX_ENTITIES = 2000
-MAPPER_REVISION = 8
+MAPPER_REVISION = 9
 
 # role: (YAML field, allowed exact DPTs). Names here are semantic roles, not GA
 # names. Standard ETS roles include AbsoluteSetvalueControl/ActualDimmingValue.
@@ -68,6 +68,13 @@ IMPULSE_BUTTONS = {
     "close_impulse_address": "關",
     "stop_impulse_address": "停",
 }
+
+# The same dry-contact curtain may also carry the addresses its wall buttons
+# send to (a GVS CHPB key in blind mode: long press up/down 1.008, short press
+# stop/step 1.007; the 7TS logic turns them into the 1s above). They are real
+# bus functions, but HA already drives the impulses directly, so they are
+# reported as not exposed rather than blocking the curtain as mixed roles.
+IMPULSE_WALL_BUTTON_FIELDS = {"move_long_address", "move_short_address"}
 
 # Longest suffix wins. A separator and a non-empty exact prefix are required.
 # This supports existing installer naming without combining vaguely similar
@@ -299,6 +306,10 @@ class _Planner:
         self.used: set[str] = set()
         self.candidates: list[dict] = []
         self.non_entity_members: set[str] = set()
+        # Function members already settled as not exposed (a dry-contact
+        # curtain's wall-button addresses): later name- and DPT-based passes
+        # must not re-read them as something else.
+        self.reserved: set[str] = set()
         self.unresolved_members: set[str] = set()
         self._load()
 
@@ -583,7 +594,7 @@ class _Planner:
         )
         names = {}
         for address, ga in sorted(self.groups.items()):
-            if address in self.used:
+            if address in self.used or address in self.reserved:
                 continue
             match = re.fullmatch(
                 r"(.+?)[\s_-]+"
@@ -650,7 +661,7 @@ class _Planner:
         )
         names = {}
         for address, ga in sorted(self.groups.items()):
-            if address in self.used:
+            if address in self.used or address in self.reserved:
                 continue
             match = re.fullmatch(
                 r"(.+?)[\s_-]+climate[\s_-]+"
@@ -706,7 +717,7 @@ class _Planner:
     def scene_metadata(self) -> None:
         """Use explicit sender parameters recovered from the same ETS archive."""
         for address, ga in sorted(self.groups.items()):
-            if address in self.used:
+            if address in self.used or address in self.reserved:
                 continue
             number = ga.get("scene_number")
             sender_ids = ga.get("scene_sender_ids")
@@ -815,6 +826,10 @@ class _Planner:
                 self.issues.setdefault(address, error)
             return
         if impulse := fields.keys() & IMPULSE_BUTTONS.keys():
+            for field in fields.keys() & IMPULSE_WALL_BUTTON_FIELDS:
+                address = fields.pop(field)
+                self.non_entity_members.add(address)
+                self.reserved.add(address)
             if fields.keys() != IMPULSE_BUTTONS.keys():
                 # A partial set (or one mixed with other roles) cannot move a
                 # curtain both ways and stop it; say so rather than guess.
@@ -990,7 +1005,7 @@ class _Planner:
         grouped: dict[str, list[tuple[str, str]]] = defaultdict(list)
         names = {}
         for address, ga in sorted(self.groups.items()):
-            if address in self.used:
+            if address in self.used or address in self.reserved:
                 continue
             parsed = _named_role(_label(ga.get("name"), ""))
             if parsed:
@@ -1009,7 +1024,7 @@ class _Planner:
 
     def fallback(self) -> None:
         for address, ga in sorted(self.groups.items()):
-            if address in self.used or address in self.blocked:
+            if address in self.used or address in self.reserved or address in self.blocked:
                 continue
             dpt = self.dpts[address]
             name = _label(ga.get("name"), f"KNX {address}")

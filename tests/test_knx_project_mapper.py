@@ -210,6 +210,8 @@ CONTRACT_V1_LOOPS = [
             ("開脈衝", (1, 1), "", False),
             ("關脈衝", (1, 1), "", False),
             ("停脈衝", (1, 1), "", False),
+            ("上下", (1, 8), "MoveUpDown", False),
+            ("停止", (1, 7), "StopStepUpDown", False),
         ],
     ),
     (
@@ -966,15 +968,21 @@ class KNXProjectMappingTests(unittest.TestCase):
                 )
             },
         )
-        # Only the deliberately non-entity relative-dimming address is left.
+        # Only deliberately non-entity addresses are left: relative dimming and
+        # the dry-contact curtain's wall-button up/down and stop.
         self.assertEqual(
-            result["skipped"],
-            [
-                {
-                    "address": table[("1F-客廳-吊燈1", "相對調光")],
-                    "reason": "function_role_not_exposed",
-                }
-            ],
+            sorted(result["skipped"], key=lambda row: row["address"]),
+            sorted(
+                (
+                    {"address": table[key], "reason": "function_role_not_exposed"}
+                    for key in (
+                        ("1F-客廳-吊燈1", "相對調光"),
+                        ("2F-主臥-窗簾1", "上下"),
+                        ("2F-主臥-窗簾1", "停止"),
+                    )
+                ),
+                key=lambda row: row["address"],
+            ),
         )
         lights = {row["name"]: row for row in result["config"]["light"]}
         self.assertEqual(lights["1F-客廳-線燈1"]["color_temperature_mode"], "absolute")
@@ -1005,6 +1013,32 @@ class KNXProjectMappingTests(unittest.TestCase):
         )
         sensors = {row["name"] for row in result["config"]["sensor"]}
         self.assertLessEqual({"1F-客廳-感測器 溫度", "1F-客廳-感測器 照度"}, sensors)
+
+    def test_impulse_curtain_wall_button_members_are_not_exposed(self):
+        # Contract CurtainImpulse with wall buttons: a CHPB key (long = up/down
+        # 1.008, short = stop 1.007) and the 7TS buttons send to these two
+        # addresses, and the 7TS logic turns them into 1s on the impulse
+        # addresses. HA already writes the impulses directly, so the two are
+        # real bus functions but not part of the entity - and they must not
+        # make the curtain a "mixed roles" function either.
+        p, table = contract_v1_project()
+        result = mapper.plan_project(p)
+        buttons = {row["name"] for row in result["config"]["button"]}
+        self.assertLessEqual(
+            {f"2F-主臥-窗簾1 {label}" for label in ("開", "關", "停")}, buttons
+        )
+        self.assertNotIn(
+            "2F-主臥-窗簾1",
+            {row["name"] for row in result["config"].get("cover", [])},
+        )
+        for suffix in ("上下", "停止"):
+            self.assertIn(
+                {
+                    "address": table[("2F-主臥-窗簾1", suffix)],
+                    "reason": "function_role_not_exposed",
+                },
+                result["skipped"],
+            )
 
     def test_partial_impulse_curtain_is_rejected_not_guessed(self):
         p, table = contract_v1_project()

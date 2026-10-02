@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- KNX mapper (`MAPPER_REVISION` 9): a Contract `CurtainImpulse` Function may also
+  carry its wall-button addresses — up/down (DPT 1.008, role `MoveUpDown`) and
+  stop/step (DPT 1.007, role `StopStepUpDown`) that a GVS CHPB key and the 7TS
+  send to, and that the 7TS logic turns into 1s on the impulse addresses. They are
+  reported as `function_role_not_exposed` instead of blocking the curtain as
+  mixed roles, and later name/DPT passes no longer re-read them (`停止` would
+  otherwise be taken as a 1.010 stop and reported as a type mismatch). The three
+  impulse buttons are unchanged.
+
 ## 0.1.25
 
 - Node-RED 橋接的 MQTT Broker 自動建議：HA Container（host 網路）的 Broker 設為 `localhost`／`127.0.0.1` 時，本機 Node-RED（IPC 安裝器的 `ha-node-red` 容器，Docker 預設 bridge 網路）連 `localhost` 只會連到容器自己。此時改建議 Docker 主機閘道 `172.17.0.1`（同一連接埠，`source: docker-host`）。0.1.24 以前以 `localhost` 部署的流程心跳不會回報，需重新部署。
