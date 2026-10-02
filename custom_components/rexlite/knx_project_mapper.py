@@ -1024,7 +1024,7 @@ class _Planner:
 
     def fallback(self) -> None:
         for address, ga in sorted(self.groups.items()):
-            if address in self.used or address in self.reserved or address in self.blocked:
+            if address in self.used | self.reserved | self.blocked:
                 continue
             dpt = self.dpts[address]
             name = _label(ga.get("name"), f"KNX {address}")
