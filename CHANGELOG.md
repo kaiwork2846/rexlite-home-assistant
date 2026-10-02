@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.25
+
+- Node-RED 橋接的 MQTT Broker 自動建議：HA Container（host 網路）的 Broker 設為 `localhost`／`127.0.0.1` 時，本機 Node-RED（IPC 安裝器的 `ha-node-red` 容器，Docker 預設 bridge 網路）連 `localhost` 只會連到容器自己。此時改建議 Docker 主機閘道 `172.17.0.1`（同一連接埠，`source: docker-host`）。0.1.24 以前以 `localhost` 部署的流程心跳不會回報，需重新部署。
+
 ## 0.1.24
 
 - Node-RED 橋接新增 Yale／GATEMAN 電子鎖範本 `yale_lock_ya071`（YA071 RF Link Module，RS-232 19200 8N1，經透傳 TCP 序列伺服器）。每個序列埠一把鎖，設備位址固定為 `1`。

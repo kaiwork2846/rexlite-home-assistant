@@ -439,6 +439,44 @@ class JobTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(done["state"], "failed")
         self.assertEqual(done["error"]["code"], "node_red_not_ready")
 
+    async def test_local_node_red_container_uses_the_docker_host_for_localhost(self):
+        for host in ("localhost", "127.0.0.1", "::1"):
+            bridges = manager(
+                NodeRed([]),
+                mqtt=Mqtt(
+                    config={
+                        "host": host,
+                        "port": 11883,
+                        "username": "ha",
+                        "password": "x",
+                    }
+                ),
+            )
+            suggestion = await bridges._suggest_broker({"kind": "local"})
+            self.assertEqual(
+                suggestion,
+                {"host": "172.17.0.1", "port": 11883, "source": "docker-host"},
+                host,
+            )
+            broker = await bridges._broker_settings({"mode": "auto"}, {"kind": "local"})
+            self.assertEqual(
+                (broker["host"], broker["port"], broker["username"]),
+                ("172.17.0.1", 11883, "ha"),
+            )
+        # A LAN broker address, or a Node-RED reached by URL, is kept as configured.
+        lan = manager(
+            NodeRed([]), mqtt=Mqtt(config={"host": "192.168.1.64", "port": 1883})
+        )
+        self.assertEqual(
+            (await lan._suggest_broker({"kind": "local"}))["host"], "192.168.1.64"
+        )
+        remote = manager(
+            NodeRed([]), mqtt=Mqtt(config={"host": "localhost", "port": 1883})
+        )
+        self.assertEqual(
+            (await remote._suggest_broker({"kind": "url"}))["host"], "localhost"
+        )
+
     async def test_add_on_broker_hostname_maps_to_host_port(self):
         class Supervisor:
             async def addon_info(self, slug):

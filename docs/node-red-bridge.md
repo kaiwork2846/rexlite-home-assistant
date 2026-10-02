@@ -35,7 +35,7 @@
 - `flow` 只能有一個 `tab`（16 碼 hex、標籤以 `RexLite` 開頭），節點類型限 inject、function、delay、tcp request、mqtt in/out、debug、catch、comment、modbus-flex-getter/write；設定節點限 `rexlite_mqtt_broker` 與 16 碼 hex 的 modbus-client。閘道 IP／Port 必須與 `bridge` 相同；MQTT Topic 限 `ac/`、`curtain/`、`lock/`、`rexlite/nodered/`；不可帶 `credentials`。
 - 合併：移除同一分頁、其節點、本次與前次的閘道設定節點後加入新流程，其餘流程原樣保留；以 v2 `rev` 部署（`Node-RED-Deployment-Type: flows`），衝突重試一次。
 - 需要 modbus 節點時自動安裝 `node-red-contrib-modbus`（案場需可連網）。
-- `broker`：`mode` auto（依 HA MQTT 設定；add-on 使用 host network 而 HA 指向 `core-mosquitto` 等主機名稱時，改用 Broker add-on 對外埠 `127.0.0.1:<port>`）或 custom（`host`、`port`）；`useHaCredentials` 預設使用 HA 的 MQTT 帳密，於主機端寫入 Node-RED 憑證，不經雲端。
+- `broker`：`mode` auto（依 HA MQTT 設定；add-on 使用 host network 而 HA 指向 `core-mosquitto` 等主機名稱時，改用 Broker add-on 對外埠 `127.0.0.1:<port>`；本機 Node-RED（IPC 安裝器的 Docker 容器）而 HA 指向 `localhost`／loopback 時，改用 Docker 主機閘道 `172.17.0.1:<port>`）或 custom（`host`、`port`）；`useHaCredentials` 預設使用 HA 的 MQTT 帳密，於主機端寫入 Node-RED 憑證，不經雲端。
 
 ## 心跳
 

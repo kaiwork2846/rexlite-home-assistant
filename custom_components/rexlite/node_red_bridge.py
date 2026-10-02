@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import copy
+import ipaddress
 import json
 import re
 import time
@@ -81,6 +82,19 @@ _UUID = re.compile(
 )
 _ROOM = re.compile(r"^[a-z][a-z0-9_]{0,39}$")
 _GATEWAY_FRESH_MS = 30_000
+DOCKER_HOST_GATEWAY = "172.17.0.1"
+
+
+def _is_loopback(host: str) -> bool:
+    host = host.strip().lower().strip("[]")
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
 # A flow that polls slowly (the Yale lock: one RF query a minute, to spare its
 # batteries) reports pollMs; its gateway stays fresh for 1.5 poll periods.
 _MAX_POLL_MS = 600_000
@@ -443,6 +457,17 @@ class NodeRedBridges:
                         "port": int(mapped),
                         "source": "addon-port",
                     }
+        # HA Container uses the host network, so its broker is often
+        # "localhost"; a Node-RED container on Docker's default bridge (the IPC
+        # installer's ha-node-red) would reach only itself there. The docker0
+        # gateway reaches the host's published broker port from both a bridged
+        # container and a native Node-RED.
+        elif info.get("kind") == "local" and _is_loopback(host):
+            suggestion = {
+                "host": DOCKER_HOST_GATEWAY,
+                "port": port,
+                "source": "docker-host",
+            }
         return suggestion
 
     async def _broker_settings(self, requested: Any, info: dict) -> dict:
