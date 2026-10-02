@@ -32,6 +32,8 @@ from .node_red_client import (
 from .rs485_protocol import (
     SOMFY_TEMPLATE,
     TEMPLATES,
+    YALE_ADDRESS,
+    YALE_TEMPLATE,
     GatewayError,
     gateway_host,
     gateway_port,
@@ -39,6 +41,7 @@ from .rs485_protocol import (
     motor_id,
     somfy_scan,
     somfy_send,
+    yale_scan,
 )
 
 DATA_KEY = "rexlite_node_red"
@@ -46,7 +49,7 @@ STORE_KEY = "rexlite.node_red"
 BRIDGE_API_VERSION = 1
 BROKER_ID = "rexlite_mqtt_broker"
 STATUS_TOPIC = "rexlite/nodered/{bridge}/status"
-TOPIC_PREFIXES = ("ac/", "curtain/", "rexlite/nodered/")
+TOPIC_PREFIXES = ("ac/", "curtain/", "lock/", "rexlite/nodered/")
 MAX_FLOW_BYTES = 512 * 1024
 MAX_NODES = 200
 MAX_DEVICES = 32
@@ -78,6 +81,9 @@ _UUID = re.compile(
 )
 _ROOM = re.compile(r"^[a-z][a-z0-9_]{0,39}$")
 _GATEWAY_FRESH_MS = 30_000
+# A flow that polls slowly (the Yale lock: one RF query a minute, to spare its
+# batteries) reports pollMs; its gateway stays fresh for 1.5 poll periods.
+_MAX_POLL_MS = 600_000
 
 
 def _now() -> str:
@@ -104,6 +110,8 @@ def validate_bridge(bridge: Any) -> dict:
     devices = bridge.get("devices")
     if not isinstance(devices, list) or not 1 <= len(devices) <= MAX_DEVICES:
         raise _fail(f"每個閘道可部署 1–{MAX_DEVICES} 台設備", "node_red_invalid_device")
+    if template == YALE_TEMPLATE and len(devices) != 1:
+        raise _fail("每個 RS-232 埠只能接一把電子鎖", "node_red_invalid_device")
     normalized: list[dict] = []
     keys: set[str] = set()
     addresses: set[str] = set()
@@ -120,6 +128,10 @@ def validate_bridge(bridge: Any) -> dict:
                 address = motor_id(raw)
             except GatewayError as err:
                 raise NodeRedError(err.code, err.message) from None
+        elif template == YALE_TEMPLATE:
+            if str(raw).strip() != YALE_ADDRESS:
+                raise _fail("電子鎖位址需為 1", "node_red_invalid_device")
+            address = YALE_ADDRESS
         else:
             text = str(raw).strip()
             if not text.isdigit() or not 1 <= int(text) <= 247:
@@ -253,15 +265,20 @@ def heartbeat_health(payload: Any, operation_id: str | None, now_ms: int) -> dic
     if operation_id and payload.get("deployment") != operation_id:
         return {"mqtt": False, "gateway": False}
     ts = payload.get("ts")
-    age = (
-        payload.get("gateway", {}).get("lastRxAgeMs")
-        if isinstance(payload.get("gateway"), dict)
-        else None
-    )
+    gateway = payload.get("gateway") if isinstance(payload.get("gateway"), dict) else {}
+    age = gateway.get("lastRxAgeMs")
+    poll = gateway.get("pollMs")
+    limit = _GATEWAY_FRESH_MS
+    if (
+        isinstance(poll, (int, float))
+        and not isinstance(poll, bool)
+        and 0 < poll <= _MAX_POLL_MS
+    ):
+        limit = max(limit, int(poll * 1.5))
     fresh = isinstance(ts, (int, float)) and abs(now_ms - ts) < 120_000
     return {
         "mqtt": fresh,
-        "gateway": fresh and isinstance(age, (int, float)) and age < _GATEWAY_FRESH_MS,
+        "gateway": fresh and isinstance(age, (int, float)) and age < limit,
         "checkedAt": _now(),
     }
 
@@ -508,6 +525,8 @@ class NodeRedBridges:
         return {
             "api": BRIDGE_API_VERSION,
             "integrationVersion": self.integration_version,
+            # Lets the platform tell which device wizards this version can deploy.
+            "templates": list(TEMPLATES),
             "nodeRed": {**info, "modules": modules},
             "mqtt": {
                 "configured": bool(config and config.get("host")),
@@ -589,6 +608,8 @@ class NodeRedBridges:
             started = time.monotonic()
             if template == SOMFY_TEMPLATE:
                 devices = await somfy_scan(host, port)
+            elif template == YALE_TEMPLATE:
+                devices = await yale_scan(host, port)
             else:
                 devices = await modbus_scan(
                     host, port, max_unit=int(msg.get("maxUnit", 16))

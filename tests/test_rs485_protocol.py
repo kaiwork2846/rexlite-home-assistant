@@ -283,5 +283,92 @@ class GatewayEmulatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(caught.exception.code, "node_red_gateway_unreachable")
 
 
+class YaleFrameTests(unittest.TestCase):
+    """YA071 v1.6 examples (2.1-2.3, 3.4, 3.7) and the 2026-09-09 site capture."""
+
+    def test_commands_match_the_vendor_frames(self):
+        self.assertEqual(m.yale_query().hex().upper(), "059101118 10F".replace(" ", ""))
+        self.assertEqual(m.yale_frame(0x02, b"\x11").hex().upper(), "05910211820F")
+        self.assertEqual(m.yale_frame(0x02, b"\x12").hex().upper(), "05910212810F")
+        # The ACK for a card unlock repeats the event with ID 91h and a new CRC.
+        self.assertEqual(
+            m.yale_frame(0x81, bytes.fromhex("3400FF")).hex().upper(),
+            "0591813400FFDB0F",
+        )
+
+    def test_status_nibbles_are_lock_then_door(self):
+        expected = {
+            0x11: ("UNLOCKED", "OPEN"),
+            0x12: ("UNLOCKED", "CLOSE"),
+            0x21: ("LOCKED", "OPEN"),
+            0x22: ("LOCKED", "CLOSE"),
+        }
+        for status, (lock, door) in expected.items():
+            frame = m.yale_frame(0x01, bytes((0x21, status)), m.YALE_FROM_MODULE)
+            (parsed,) = m.parse_yale_frames(frame)
+            self.assertEqual(m.yale_status(parsed), {"lock": lock, "door": door})
+        (site,) = m.parse_yale_frames(bytes.fromhex("0519012111280f"))
+        self.assertEqual(m.yale_status(site), {"lock": "UNLOCKED", "door": "OPEN"})
+
+    def test_stream_resyncs_and_rejects_bad_crc(self):
+        stream = bytes.fromhex(
+            "aa050519012111290f0519813400ff530f051982118a0f0519fe11f60f"
+        )
+        frames = m.parse_yale_frames(stream)
+        self.assertEqual(
+            [(f.cmd, f.data.hex()) for f in frames],
+            [(0x81, "3400ff"), (0x82, "11"), (0xFE, "11")],
+        )
+
+
+class YaleGatewayTests(unittest.IsolatedAsyncioTestCase):
+    async def serve(self, handler):
+        server = await asyncio.start_server(handler, "127.0.0.1", 0)
+        self.addAsyncCleanup(server.wait_closed)
+        self.addCleanup(server.close)
+        return server.sockets[0].getsockname()[1]
+
+    async def test_scan_reports_lock_and_door(self):
+        received = bytearray()
+
+        async def handle(reader, writer):
+            while data := await reader.read(64):
+                received.extend(data)
+                if data == m.yale_query():
+                    # Noise from the serial line, then the reply split in two.
+                    writer.write(bytes.fromhex("ff0519012122"))
+                    await writer.drain()
+                    writer.write(bytes.fromhex("1b0f"))
+                    await writer.drain()
+            writer.close()
+
+        port = await self.serve(handle)
+        devices = await m.yale_scan("127.0.0.1", port, window=0.3)
+        self.assertEqual(
+            devices, [{"address": "1", "lock": {"lock": "LOCKED", "door": "CLOSE"}}]
+        )
+        self.assertEqual(bytes(received[:6]), m.yale_query())
+
+    async def test_rf_error_and_silence_are_distinguished(self):
+        async def rf_error(reader, writer):
+            while await reader.read(64):
+                writer.write(bytes.fromhex("0519fe11f60f"))
+                await writer.drain()
+            writer.close()
+
+        port = await self.serve(rf_error)
+        with self.assertRaises(m.GatewayError) as caught:
+            await m.yale_scan("127.0.0.1", port, window=0.2)
+        self.assertEqual(caught.exception.code, "node_red_device_unreachable")
+
+        async def silent(reader, writer):
+            while await reader.read(64):
+                pass
+            writer.close()
+
+        port = await self.serve(silent)
+        self.assertEqual(await m.yale_scan("127.0.0.1", port, window=0.2), [])
+
+
 if __name__ == "__main__":
     unittest.main()

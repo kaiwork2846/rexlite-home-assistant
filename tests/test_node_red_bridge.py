@@ -44,6 +44,12 @@ ACS = {
     "gatewayPort": "1621",
     "devices": [{"name": "客廳冷氣", "key": "livingroom", "address": "2"}],
 }
+LOCK = {
+    "template": "yale_lock_ya071",
+    "gatewayHost": "192.168.1.35",
+    "gatewayPort": 26,
+    "devices": [{"name": "前門", "key": "front_door", "address": "1"}],
+}
 
 
 def broker():
@@ -115,6 +121,54 @@ class ValidationTests(unittest.TestCase):
                 {**ACS, "devices": [{**ACS["devices"][0], "address": "300"}]}
             )
 
+    def test_yale_lock_is_one_device_per_serial_port(self):
+        self.assertEqual(m.validate_bridge(LOCK)["devices"][0]["address"], "1")
+        for change in (
+            {"devices": [{**LOCK["devices"][0], "address": "2"}]},
+            {
+                "devices": [
+                    LOCK["devices"][0],
+                    {"name": "後門", "key": "back_door", "address": "1"},
+                ]
+            },
+        ):
+            with self.assertRaises(m.NodeRedError, msg=change):
+                m.validate_bridge({**LOCK, **change})
+
+    def test_yale_flow_may_use_lock_topics_only_on_its_gateway(self):
+        bridge = m.validate_bridge(LOCK)
+        flow = [
+            {"id": TAB, "type": "tab", "label": "RexLite · 耶魯電子鎖"},
+            {
+                "id": "c1",
+                "type": "mqtt in",
+                "z": TAB,
+                "topic": "lock/+/set",
+                "broker": m.BROKER_ID,
+            },
+            {
+                "id": "c2",
+                "type": "tcp request",
+                "z": TAB,
+                "server": "192.168.1.35",
+                "port": "26",
+                "out": "sit",
+            },
+            {
+                "id": "c3",
+                "type": "mqtt out",
+                "z": TAB,
+                "topic": "",
+                "broker": m.BROKER_ID,
+            },
+            broker(),
+        ]
+        self.assertEqual(m.validate_flow(flow, bridge)["tabId"], TAB)
+        bad = copy.deepcopy(flow)
+        bad[1]["topic"] = "homeassistant/lock/x/config"
+        with self.assertRaises(m.NodeRedError):
+            m.validate_flow(bad, bridge)
+
     def test_flow_shape_is_enforced(self):
         shape = m.validate_flow(curtain_flow(), m.validate_bridge(CURTAINS))
         self.assertEqual(shape["tabId"], TAB)
@@ -166,6 +220,18 @@ class ValidationTests(unittest.TestCase):
         self.assertEqual((node["broker"], node["port"]), ("127.0.0.1", "1883"))
         self.assertEqual(node["credentials"], {"user": "ha", "password": "pw"})
         self.assertNotIn("credentials", curtain_flow()[5])
+
+    def test_slow_polling_flows_report_their_period(self):
+        now = int(time.time() * 1000)
+        beat = {"deployment": OPERATION, "ts": now, "gateway": {"lastRxAgeMs": 55_000}}
+        self.assertFalse(m.heartbeat_health(beat, OPERATION, now)["gateway"])
+        beat["gateway"]["pollMs"] = 60_000
+        self.assertTrue(m.heartbeat_health(beat, OPERATION, now)["gateway"])
+        beat["gateway"].update(lastRxAgeMs=95_000)
+        self.assertFalse(m.heartbeat_health(beat, OPERATION, now)["gateway"])
+        # An absurd period cannot hide a dead gateway.
+        beat["gateway"].update(pollMs=10**9, lastRxAgeMs=3_600_000)
+        self.assertFalse(m.heartbeat_health(beat, OPERATION, now)["gateway"])
 
     def test_heartbeat_health(self):
         now = int(time.time() * 1000)

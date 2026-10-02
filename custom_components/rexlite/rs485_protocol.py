@@ -1,8 +1,10 @@
-"""RS-485 gateway protocols used by REXLiTE Node-RED bridges.
+"""RS-485 / RS-232 gateway protocols used by REXLiTE Node-RED bridges.
 
-Somfy SDN (Glydea curtain motors) and Hitachi air conditioners behind a
-Modbus TCP gateway. Everything here is plain asyncio so it can be unit tested
-without Home Assistant; the bridge manager only calls the async helpers.
+Somfy SDN (Glydea curtain motors), Hitachi air conditioners behind a
+Modbus TCP gateway, and the Yale / GATEMAN YA071 RF link module (one lock
+per RS-232 port of a transparent TCP serial server). Everything here is
+plain asyncio so it can be unit tested without Home Assistant; the bridge
+manager only calls the async helpers.
 """
 
 from __future__ import annotations
@@ -15,7 +17,10 @@ from dataclasses import dataclass, field
 
 SOMFY_TEMPLATE = "somfy_curtain_rs485"
 HITACHI_TEMPLATE = "hitachi_ac_modbus"
-TEMPLATES = (HITACHI_TEMPLATE, SOMFY_TEMPLATE)
+YALE_TEMPLATE = "yale_lock_ya071"
+TEMPLATES = (HITACHI_TEMPLATE, SOMFY_TEMPLATE, YALE_TEMPLATE)
+# YA071 has no bus address: one lock per serial port, always device "1".
+YALE_ADDRESS = "1"
 
 # SDN frames are sent bit-inverted. Header bytes below are the decoded values
 # used by the vendor-verified frames (NodeType F6h: master -> Glydea motor).
@@ -379,3 +384,114 @@ async def modbus_scan(
     finally:
         await _close(writer)
     return found
+
+
+# Yale YA071 RF link module (protocol v1.6, 19200 8N1) -------------------------
+#
+#   05 | ID | CMD | DATA (1-14 bytes) | CRC | 0F
+#
+# ID 91h = controller -> module, 19h = module -> controller. The high nibble of
+# the first DATA byte is the DATA length; CRC = ID ^ CMD ^ every DATA byte.
+
+YALE_START = 0x05
+YALE_END = 0x0F
+YALE_TO_MODULE = 0x91
+YALE_FROM_MODULE = 0x19
+YALE_STATUS = 0x01
+YALE_CONTROL_ERROR = 0xFE
+
+
+def yale_frame(cmd: int, data: bytes, ident: int = YALE_TO_MODULE) -> bytes:
+    crc = ident ^ cmd
+    for byte in data:
+        crc ^= byte
+    return bytes((YALE_START, ident, cmd)) + data + bytes((crc, YALE_END))
+
+
+def yale_query() -> bytes:
+    """Lock status check (section 2.1): 05 91 01 11 81 0F."""
+
+    return yale_frame(YALE_STATUS, b"\x11")
+
+
+@dataclass(frozen=True, slots=True)
+class YaleFrame:
+    ident: int
+    cmd: int
+    data: bytes
+
+
+def parse_yale_frames(buffer: bytes) -> list[YaleFrame]:
+    """Split a serial stream into CRC-valid YA071 frames, skipping noise."""
+
+    frames: list[YaleFrame] = []
+    index = 0
+    while index + 6 <= len(buffer):
+        if buffer[index] != YALE_START:
+            index += 1
+            continue
+        length = buffer[index + 3] >> 4
+        end = index + 5 + length
+        if not 1 <= length <= 14 or end > len(buffer) or buffer[end - 1] != YALE_END:
+            index += 1
+            continue
+        ident, cmd = buffer[index + 1], buffer[index + 2]
+        data = buffer[index + 3 : index + 3 + length]
+        crc = ident ^ cmd
+        for byte in data:
+            crc ^= byte
+        if crc != buffer[end - 2]:
+            index += 1
+            continue
+        frames.append(YaleFrame(ident, cmd, bytes(data)))
+        index = end
+    return frames
+
+
+def yale_status(frame: YaleFrame) -> dict | None:
+    """Status reply 05 19 01 21 ST.
+
+    High nibble: lock (1 unlocked, 2 locked). Low nibble: door (1 open, 2 closed).
+    """
+
+    if frame.ident != YALE_FROM_MODULE or frame.cmd != YALE_STATUS:
+        return None
+    if len(frame.data) < 2 or frame.data[0] != 0x21:
+        return None
+    status = frame.data[1]
+    return {
+        "lock": {1: "UNLOCKED", 2: "LOCKED"}.get(status >> 4),
+        "door": {1: "OPEN", 2: "CLOSE"}.get(status & 0x0F),
+    }
+
+
+async def yale_scan(
+    host: str, port: int, *, attempts: int = 2, window: float = 3.5
+) -> list[dict]:
+    """Ask the lock for its status; the reply takes about 2.5 s over RF.
+
+    A control error (FEh) means the serial server and RF module answered but
+    the lock itself did not, which is reported separately from "no reply".
+    """
+
+    reader, writer = await _connect(host, port)
+    rf_error = False
+    try:
+        for _ in range(attempts):
+            writer.write(yale_query())
+            await writer.drain()
+            frames = parse_yale_frames(await _collect(reader, window))
+            for frame in frames:
+                if (state := yale_status(frame)) is not None:
+                    return [{"address": YALE_ADDRESS, "lock": state}]
+                if frame.ident == YALE_FROM_MODULE and frame.cmd == YALE_CONTROL_ERROR:
+                    rf_error = True
+            await asyncio.sleep(0.3)
+    finally:
+        await _close(writer)
+    if rf_error:
+        raise GatewayError(
+            "node_red_device_unreachable",
+            "閘道與 RF 模組有回應，但電子鎖沒有回應：請確認電子鎖電池與 RF 模組配對",
+        )
+    return []

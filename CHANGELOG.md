@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.24
+
+- Node-RED 橋接新增 Yale／GATEMAN 電子鎖範本 `yale_lock_ya071`（YA071 RF Link Module，RS-232 19200 8N1，經透傳 TCP 序列伺服器）。每個序列埠一把鎖，設備位址固定為 `1`。
+- `rexlite/nodered/scan` 對電子鎖送出狀態查詢（`05 91 01 11 81 0F`），回報上鎖與門磁狀態；RF 模組回 `FEh` 時以 `node_red_device_unreachable` 區分「閘道正常、鎖沒有回應」。
+- 流程允許 `lock/` MQTT Topic；心跳可帶 `gateway.pollMs`，閘道新鮮度放寬為 1.5 個輪詢週期（上限 10 分鐘），讓每分鐘查詢一次的電子鎖不會被誤判為離線。
+- `rexlite/nodered/status` 回傳 `templates`，平台據此判斷此版本可部署的設備類型。
+
 ## 0.1.23
 
 - Declare `mqtt` in `after_dependencies` for the Node-RED bridge heartbeat check (hassfest). MQTT remains optional; no behaviour change.
