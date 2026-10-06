@@ -17,7 +17,7 @@ from typing import Any
 
 MAX_GROUP_ADDRESSES = 65535
 MAX_ENTITIES = 2000
-MAPPER_REVISION = 9
+MAPPER_REVISION = 10
 
 # role: (YAML field, allowed exact DPTs). Names here are semantic roles, not GA
 # names. Standard ETS roles include AbsoluteSetvalueControl/ActualDimmingValue.
@@ -54,7 +54,10 @@ ROLE_FIELDS = {
     "fanspeedstate": ("fan_speed_state_address", {(5, 1)}),
     "scene": ("address", {(17, 1), (18, 1)}),
     "impulseopen": ("open_impulse_address", {(1, 1)}),
-    "impulseclose": ("close_impulse_address", {(1, 1)}),
+    # The close impulse may also be declared 1.008 (Down = 1): no 7TS logic is spent
+    # on it, as the actuator's close channel listens to the wall buttons'
+    # up/down address directly, and one object carries one datapoint type.
+    "impulseclose": ("close_impulse_address", {(1, 1), (1, 8)}),
     "impulsestop": ("stop_impulse_address", {(1, 1)}),
 }
 

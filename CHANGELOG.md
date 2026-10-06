@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- KNX mapper（`MAPPER_REVISION` 10）：乾接點窗簾 `CurtainImpulse` 的「關脈衝」也接受 DPT 1.008（Down＝1）。REXLiTE ETS App 0.18.3 起，KAA 關通道直接聽牆面「上下」位址（按「關」本來就送 1），7TS 不再為「關」花一個 LOGIC，一台 7TS 從 2 個窗簾變成 4 個；同一個物件只能有一種 DPT，所以「關脈衝」改宣告為 1.008。原本 1.001 的專案（App 0.14–0.18.2）照舊產生「關」按鈕。
+- App 0.18.3 以後匯出的窗簾**需要本版**；舊版 mapper（rev 9）對 1.008 的「關脈衝」回報 `role_datapoint_type_mismatch`，整個窗簾不出實體（已用 App 0.18.3 的 e2e 匯出實測）。
+
 ## 0.1.26
 
 - KNX mapper（`MAPPER_REVISION` 9）：REXLiTE KNX Contract 乾接點窗簾 `CurtainImpulse` 的 Function 可以多帶兩個牆面按鍵位址——上下（DPT 1.008，Role `MoveUpDown`）與停止／微調（DPT 1.007，Role `StopStepUpDown`）。GVS CHPB 窗簾鍵與 7TS 畫面按鈕送到這兩個位址，再由 7TS LOGIC 轉成脈衝位址的 1。這兩個位址回報為 `function_role_not_exposed`，不再讓整個窗簾變成 `incompatible_function_roles`；後續的名稱／DPT 分組也不再重新解析它們（否則「停止」會被當成 1.010 而回報型別不符）。三個脈衝 `button` 實體不變。

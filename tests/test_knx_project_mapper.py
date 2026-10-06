@@ -208,7 +208,7 @@ CONTRACT_V1_LOOPS = [
         "2F-主臥-窗簾1",
         [
             ("開脈衝", (1, 1), "", False),
-            ("關脈衝", (1, 1), "", False),
+            ("關脈衝", (1, 8), "", False),
             ("停脈衝", (1, 1), "", False),
             ("上下", (1, 8), "MoveUpDown", False),
             ("停止", (1, 7), "StopStepUpDown", False),
@@ -1039,6 +1039,31 @@ class KNXProjectMappingTests(unittest.TestCase):
                 },
                 result["skipped"],
             )
+
+    def test_impulse_curtain_close_accepts_switch_or_up_down_datapoint(self):
+        # Since ETS App 0.18.3 the close impulse is 1.008 (Down = 1): the
+        # actuator's close channel also listens to the wall buttons' up/down
+        # address, so the 7TS needs no logic for it. Projects exported by
+        # 0.14-0.18.2 declare it 1.001 and must keep their close button.
+        for sub in (1, 8):
+            with self.subTest(sub=sub):
+                p, table = contract_v1_project()
+                close = table[("2F-主臥-窗簾1", "關脈衝")]
+                p["group_addresses"][close]["dpt"] = {"main": 1, "sub": sub}
+                for obj in p["communication_objects"].values():
+                    if close in obj.get("group_address_links", []):
+                        obj["dpts"] = [{"main": 1, "sub": sub}]
+                        if sub == 8:
+                            # The KAA close channel object, also on 上下.
+                            obj["group_address_links"].append(
+                                table[("2F-主臥-窗簾1", "上下")]
+                            )
+                result = mapper.plan_project(p)
+                buttons = {row["name"]: row for row in result["config"]["button"]}
+                self.assertEqual(buttons["2F-主臥-窗簾1 關"]["address"], close)
+                self.assertNotIn(
+                    close, {row["address"] for row in result["skipped"]}
+                )
 
     def test_partial_impulse_curtain_is_rejected_not_guessed(self):
         p, table = contract_v1_project()
