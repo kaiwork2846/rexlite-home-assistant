@@ -1061,9 +1061,7 @@ class KNXProjectMappingTests(unittest.TestCase):
                 result = mapper.plan_project(p)
                 buttons = {row["name"]: row for row in result["config"]["button"]}
                 self.assertEqual(buttons["2F-主臥-窗簾1 關"]["address"], close)
-                self.assertNotIn(
-                    close, {row["address"] for row in result["skipped"]}
-                )
+                self.assertNotIn(close, {row["address"] for row in result["skipped"]})
 
     def test_partial_impulse_curtain_is_rejected_not_guessed(self):
         p, table = contract_v1_project()
