@@ -1683,13 +1683,7 @@ class ProjectDeployer:
                 )
                 manifest.update(
                     counts,
-                    # Scenes the SI left out are a choice, not something unmapped.
-                    status="partial"
-                    if any(
-                        item.get("reason") != SCENE_NOT_SELECTED
-                        for item in plan["skipped"]
-                    )
-                    else "completed",
+                    status="partial" if plan["skipped"] else "completed",
                     stage="completed",
                 )
                 manifest.pop("config", None)

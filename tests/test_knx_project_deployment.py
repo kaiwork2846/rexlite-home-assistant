@@ -448,7 +448,7 @@ class DeploymentTests(unittest.IsolatedAsyncioTestCase):
         result = await self.writer.deploy(
             FINGERPRINT, scene_selection=[m.scene_key("0/7/3", 1)]
         )
-        self.assertEqual(result["status"], "completed", result)
+        self.assertEqual(result["status"], "partial", result)
         self.assertEqual(result["entityCount"], 4)
         self.assertEqual(self.configured_scenes(), ["0/7/1", "0/7/2"])
         self.assertIn(
