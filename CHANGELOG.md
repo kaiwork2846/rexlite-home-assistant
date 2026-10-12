@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.28
+
+- 新增 Frigate 攝影機橋接 `rexlite/frigate/*`（見 `docs/frigate-bridge.md`）：運營平台與 MAX'Is Tool App 經主機把 IP 攝影機加入同機的 Frigate。主機端做 ONVIF WS-Discovery（排除 Windows／NAS 的 WSD 主機）、ONVIF 取串流（攝影機時鐘簽章、2020／80／8000／8899 埠）、RTSP DESCRIBE 驗證帳密與路徑（TP-Link `/stream1`、`/stream2` 等常見路徑備援），再寫入 go2rtc restream 與攝影機設定、重新啟動 Frigate，確認有畫面才算完成，否則還原。
+- 加入與移除都以重新啟動套用：Frigate 0.16–0.17 只有一台攝影機時收不到即時新增，物件處理會停止、錄影存不下來；即時移除會停錯攝影機。移除前先停掉該攝影機的錄影與擷取，避免殘留的錄影快取讓其他攝影機的錄影維護失敗。
+- 需要 HA MCP 與運營平台後端的 `/ha/frigate`、`/remote-connections/:agentId/frigate`。
+- KNX：ETS 專案密碼錯誤時在啟用 KNX 整合前擋下（75d8774）。
+
 ## 0.1.27
 
 - KNX mapper（`MAPPER_REVISION` 10）：乾接點窗簾 `CurtainImpulse` 的「關脈衝」也接受 DPT 1.008（Down＝1）。REXLiTE ETS App 0.18.3 起，KAA 關通道直接聽牆面「上下」位址（按「關」本來就送 1），7TS 不再為「關」花一個 LOGIC，一台 7TS 從 2 個窗簾變成 4 個；同一個物件只能有一種 DPT，所以「關脈衝」改宣告為 1.008。原本 1.001 的專案（App 0.14–0.18.2）照舊產生「關」按鈕。
