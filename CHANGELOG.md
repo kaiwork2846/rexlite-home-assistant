@@ -6,6 +6,9 @@
 - 加入與移除都以重新啟動套用：Frigate 0.16–0.17 只有一台攝影機時收不到即時新增，物件處理會停止、錄影存不下來；即時移除會停錯攝影機。移除前先停掉該攝影機的錄影與擷取，避免殘留的錄影快取讓其他攝影機的錄影維護失敗。
 - 需要 HA MCP 與運營平台後端的 `/ha/frigate`、`/remote-connections/:agentId/frigate`。
 - KNX：ETS 專案密碼錯誤時在啟用 KNX 整合前擋下（75d8774）。
+- KNX 部署：SI 在平台選「哪些 ETS 情境（REXLiTE 3TS 下方的情境鍵）進 HA」。所有鍵照舊都在 `.knxproj` 裡；新指令 `rexlite/knx/scene_selection`（admin）帶 `excluded: [{address, sceneNumber}]`，沒選的 scene 不寫進產生的 knx YAML、`skipped` 回報 `scene_not_selected`，並立刻重新部署。
+- 選擇存在部署 manifest（`sceneSelection`），重試、mapper 升版、同一戶重新上傳都沿用；部署失敗回滾時選擇一起還原。部署結果與 `project_deployment_status` 多回 `sceneKeys`（每個 ETS scene 的名稱、位址、場景號、`selected`），平台據此顯示勾選。`project_capabilities` 多 `sceneSelection: true`。
+- 排除的 scene 跟其他 skipped 一樣讓狀態成為 `partial`（雲端驗證規定 `completed` 不能有 skipped）。
 
 ## 0.1.27
 
