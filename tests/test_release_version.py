@@ -19,3 +19,19 @@ class ReleaseVersionTests(unittest.TestCase):
             and node.target.id == "INTEGRATION_VERSION"
         ]
         self.assertEqual(versions, [manifest["version"]])
+
+    def test_readme_and_changelog_name_the_released_version(self) -> None:
+        # One release, one version everywhere a person or HACS looks for it.
+        repo = Path(__file__).parents[1]
+        version = json.loads(
+            (repo / "custom_components" / "rexlite" / "manifest.json").read_text()
+        )["version"]
+        readme = (repo / "README.md").read_text(encoding="utf-8")
+        self.assertIn(f"**目前版本：`{version}`**", readme)
+        changelog = (repo / "CHANGELOG.md").read_text(encoding="utf-8")
+        latest = next(
+            line[3:].strip()
+            for line in changelog.splitlines()
+            if line.startswith("## ")
+        )
+        self.assertEqual(latest, version)
