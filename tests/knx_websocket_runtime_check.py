@@ -60,7 +60,7 @@ async def main() -> None:
         hass = HomeAssistant(directory)
         deployer = m.register_websocket_commands(hass)
         assert m.register_websocket_commands(hass) is deployer
-        assert len(hass.data["websocket_api"]) == 8
+        assert len(hass.data["websocket_api"]) == 9
         admin = User(name="Test administrator", perm_lookup=None, is_owner=True)
         viewer = User(name="Test viewer", perm_lookup=None)
         responses = asyncio.Queue()
@@ -193,6 +193,42 @@ async def main() -> None:
                 else:
                     assert response["error"]["code"] == "unauthorized", response
                     work.assert_not_called()
+
+        # The SI's scene choice: admin-only, schema-checked, canonical scene keys.
+        for user in (viewer, admin):
+            connection.user = user
+            with patch.object(
+                deployer, "deploy", AsyncMock(return_value={"status": "completed"})
+            ) as work:
+                response = await request(
+                    "scene_selection",
+                    {
+                        "projectFingerprint": fingerprint,
+                        "excluded": [{"address": "0/7/3", "sceneNumber": 1}],
+                    },
+                )
+                if user is admin:
+                    assert response["success"], response
+                    work.assert_awaited_once_with(
+                        fingerprint, scene_selection=["0/7/3|1"]
+                    )
+                else:
+                    assert response["error"]["code"] == "unauthorized", response
+                    work.assert_not_called()
+        with patch.object(deployer, "deploy", AsyncMock()) as work:
+            for excluded, code in (
+                ([{"address": "0/7/3", "sceneNumber": 65}], "invalid_format"),
+                (
+                    [{"address": "not an address", "sceneNumber": 1}],
+                    "invalid_scene_selection",
+                ),
+            ):
+                response = await request(
+                    "scene_selection",
+                    {"projectFingerprint": fingerprint, "excluded": excluded},
+                )
+                assert response["error"]["code"] == code, response
+            work.assert_not_called()
 
         # Schema validation must reject bad fingerprints before any operation.
         with patch.object(deployer, "deploy", AsyncMock()) as work:

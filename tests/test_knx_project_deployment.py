@@ -407,6 +407,100 @@ class DeploymentTests(unittest.IsolatedAsyncioTestCase):
         self.mapper.start()
         self.addCleanup(self.mapper.stop)
 
+    def scene_plan(self):
+        plan = deepcopy(PLAN)
+        plan["config"]["scene"] = [
+            {
+                "name": f"1F-主臥 按鈕-{key}",
+                "address": f"0/7/{key}",
+                "scene_number": 1,
+                "unique_id": f"auto-scene-{key}",
+            }
+            for key in (1, 2, 3)
+        ]
+        plan["entities"].extend(
+            {
+                "platform": "scene",
+                "uniqueId": f"auto-scene-{key}",
+                "addresses": [f"0/7/{key}"],
+            }
+            for key in (1, 2, 3)
+        )
+        plan["entityCount"] = 5
+        return plan
+
+    def configured_scenes(self):
+        return [
+            row["address"] for row in load_config(self.root)["knx"].get("scene", [])
+        ]
+
+    async def test_scene_selection_leaves_keys_out_and_survives_redeploys(self):
+        self.mapper.stop()
+        self.mapper = patch.object(m, "plan_project", return_value=self.scene_plan())
+        self.mapper.start()
+        result = await self.writer.deploy(FINGERPRINT)
+        self.assertEqual(result["entityCount"], 5, result)
+        self.assertEqual(
+            [(k["address"], k["selected"]) for k in result["sceneKeys"]],
+            [("0/7/1", True), ("0/7/2", True), ("0/7/3", True)],
+        )
+
+        result = await self.writer.deploy(
+            FINGERPRINT, scene_selection=[m.scene_key("0/7/3", 1)]
+        )
+        self.assertEqual(result["status"], "completed", result)
+        self.assertEqual(result["entityCount"], 4)
+        self.assertEqual(self.configured_scenes(), ["0/7/1", "0/7/2"])
+        self.assertIn(
+            {"address": "0/7/3", "reason": m.SCENE_NOT_SELECTED}, result["skipped"]
+        )
+        self.assertEqual(
+            [k["selected"] for k in result["sceneKeys"]], [True, True, False]
+        )
+        self.assertEqual(
+            self.writer.files.read_json(m.MANIFEST)["sceneSelection"], ["0/7/3|1"]
+        )
+
+        # A retry, and a new mapper revision, keep the SI's choice.
+        retry = await self.writer.deploy(FINGERPRINT)
+        self.assertEqual(retry["entityCount"], 4)
+        self.assertEqual(
+            [k["selected"] for k in retry["sceneKeys"]], [True, True, False]
+        )
+        upgraded = await self.deploy_plan(self.scene_plan())
+        self.assertEqual(upgraded["entityCount"], 4, upgraded)
+        self.assertEqual(self.configured_scenes(), ["0/7/1", "0/7/2"])
+
+        # Selected again: the key is back.
+        result = await self.writer.deploy(FINGERPRINT, scene_selection=[])
+        self.assertEqual(result["entityCount"], 5, result)
+        self.assertEqual(self.configured_scenes(), ["0/7/1", "0/7/2", "0/7/3"])
+
+    async def test_scene_selection_keeps_the_old_choice_when_the_deploy_fails(self):
+        self.mapper.stop()
+        self.mapper = patch.object(m, "plan_project", return_value=self.scene_plan())
+        self.mapper.start()
+        await self.writer.deploy(FINGERPRINT)
+        self.schema_fail = True
+        result = await self.writer.deploy(
+            FINGERPRINT, scene_selection=[m.scene_key("0/7/1", 1)]
+        )
+        self.assertEqual(result["status"], "failed", result)
+        self.schema_fail = False
+        self.assertEqual(self.writer.files.read_json(m.MANIFEST)["sceneSelection"], [])
+        self.assertEqual(self.configured_scenes(), ["0/7/1", "0/7/2", "0/7/3"])
+
+    def test_scene_key_is_canonical_and_bounded(self):
+        self.assertEqual(m.scene_key("0/7/3", 1), "0/7/3|1")
+        for address, number in (
+            ("bad", 1),
+            ("0/7/3", 0),
+            ("0/7/3", 65),
+            ("0/7/3", "1"),
+        ):
+            with self.assertRaises(m.DeploymentError):
+                m.scene_key(address, number)
+
     async def test_manual_yaml_check_is_read_only_and_deploy_preserves_existing(self):
         await self.writer.deploy(FINGERPRINT)
         before = self.writer.files.read(m.GENERATED)
@@ -1059,7 +1153,7 @@ class DeploymentTests(unittest.IsolatedAsyncioTestCase):
             m.register_websocket_commands(self.hass)
             m.register_websocket_commands(self.hass)
         self.addCleanup(self.hass.data["rexlite_knx_uploads"].close)
-        self.assertEqual(len(handlers), 8)
+        self.assertEqual(len(handlers), 9)
         for handler in handlers:
             with self.assertRaises(PermissionError):
                 await handler(self.hass, Connection(), {"id": 1})

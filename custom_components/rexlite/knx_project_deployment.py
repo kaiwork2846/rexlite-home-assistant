@@ -415,6 +415,65 @@ def adapt_plan_identity(
     return result
 
 
+SCENE_NOT_SELECTED = "scene_not_selected"
+MAX_SCENE_SELECTION = 1024
+
+
+def scene_key(address: Any, scene_number: Any) -> str:
+    """The stable identity of one ETS scene: its address and scene number."""
+    canonical = _address(str(address))
+    if not canonical or type(scene_number) is not int or not 1 <= scene_number <= 64:
+        raise DeploymentError("invalid_scene_selection")
+    return f"{canonical}|{scene_number}"
+
+
+def select_scenes(
+    plan: dict, excluded: list[str], address_format: str | None = None
+) -> dict:
+    """Leave the ETS scenes the site's SI did not select out of the generated YAML.
+
+    A scene here is a wall key the homeowner may set (a REXLiTE 3TS key): every one
+    is in the ETS project, and the SI chooses on the platform which ones Home
+    Assistant gets. ``sceneKeys`` lists all of them, selected or not, so the
+    platform can show the choice and change it later.
+    """
+    result = deepcopy(plan)
+    left_out = set(excluded)
+    wanted = {(e["platform"], e["uniqueId"]): e for e in plan["entities"]}
+    dropped, kept, keys = set(), [], []
+    for row in plan["config"].get("scene", []):
+        key = scene_key(row["address"], row["scene_number"])
+        selected = key not in left_out
+        keys.append(
+            {
+                "name": row["name"],
+                "address": key.split("|")[0],
+                "sceneNumber": row["scene_number"],
+                "selected": selected,
+            }
+        )
+        if selected:
+            kept.append(row)
+        else:
+            dropped.add(("scene", row_identity("scene", row, address_format)))
+    if kept:
+        result["config"]["scene"] = kept
+    else:
+        result["config"].pop("scene", None)
+    result["entities"] = [
+        entity for key, entity in wanted.items() if key not in dropped
+    ]
+    result["entityCount"] = len(result["entities"])
+    result["skipped"] = list(plan.get("skipped", [])) + [
+        {"address": key["address"], "reason": SCENE_NOT_SELECTED}
+        for key in keys
+        if not key["selected"]
+    ]
+    result["sceneKeys"] = keys
+    result["sceneSelection"] = sorted(left_out)
+    return result
+
+
 def filter_existing(
     plan: dict,
     existing: dict,
@@ -926,6 +985,7 @@ class ProjectDeployer:
             "chunkedUpload": True,
             "maxProjectBytes": MAX_PROJECT_BYTES,
             "passwordCheck": True,
+            "sceneSelection": True,
         }
         try:
             info.update(self._compatibility())
@@ -1234,6 +1294,7 @@ class ProjectDeployer:
             "error",
             "manualDigest",
             "manualCount",
+            "sceneKeys",
         )
         return {key: manifest[key] for key in keys if key in manifest}
 
@@ -1280,7 +1341,13 @@ class ProjectDeployer:
         manual_yaml: str | None = None,
         check_only: bool = False,
         baseline: str = "",
+        scene_selection: list[str] | None = None,
     ) -> dict:
+        """Deploy the imported project.
+
+        ``scene_selection`` is the ETS scenes to leave out (``scene_key``); None keeps
+        the active deployment's choice, which a new upload of the site inherits.
+        """
         if not FINGERPRINT.fullmatch(fingerprint):
             raise DeploymentError("invalid_project_fingerprint")
         async with self.lock:
@@ -1318,6 +1385,15 @@ class ProjectDeployer:
                         raise DeploymentError(
                             "managed_custom_identity_requires_newer_core"
                         )
+                selection = sorted(
+                    set(
+                        scene_selection
+                        if scene_selection is not None
+                        else (previous or {}).get("sceneSelection", [])
+                    )
+                )
+                if scene_selection is not None and manual_yaml is not None:
+                    raise DeploymentError("invalid_scene_selection")
                 module = self._module()
                 self._schema_preflight(mode)
                 project = await module.project.get_knxproject()
@@ -1339,6 +1415,7 @@ class ProjectDeployer:
                     and previous.get("mapperRevision") == MAPPER_REVISION
                     and (previous.get("parsedProjectDigest") == parsed_hash)
                     and previous.get("status") in ("completed", "partial")
+                    and previous.get("sceneSelection", []) == selection
                 ):
                     try:
                         await self._verify_configuration(previous)
@@ -1354,9 +1431,14 @@ class ProjectDeployer:
                                 self.files.write_json, LAST_ATTEMPT, verified
                             )
                             return self._public(verified)
-                plan = adapt_plan_identity(
-                    await self._io(plan_project, project), mode, address_format
+                plan = select_scenes(
+                    adapt_plan_identity(
+                        await self._io(plan_project, project), mode, address_format
+                    ),
+                    selection,
+                    address_format,
                 )
+                scene_keys = plan["sceneKeys"]
                 from homeassistant.config import async_hass_config_yaml
 
                 configured = await async_hass_config_yaml(self.hass)
@@ -1473,6 +1555,8 @@ class ProjectDeployer:
                     )
                 manifest.update(
                     plan,
+                    sceneKeys=scene_keys,
+                    sceneSelection=selection,
                     parsedProjectDigest=parsed_hash,
                     configEntryId=module.entry.entry_id,
                     mapperRevision=(previous or {}).get("mapperRevision", 0)
@@ -1599,7 +1683,13 @@ class ProjectDeployer:
                 )
                 manifest.update(
                     counts,
-                    status="partial" if plan["skipped"] else "completed",
+                    # Scenes the SI left out are a choice, not something unmapped.
+                    status="partial"
+                    if any(
+                        item.get("reason") != SCENE_NOT_SELECTED
+                        for item in plan["skipped"]
+                    )
+                    else "completed",
                     stage="completed",
                 )
                 manifest.pop("config", None)
@@ -1819,6 +1909,42 @@ def register_websocket_commands(hass: Any) -> ProjectDeployer:
         )
         connection.send_result(msg["id"], await asyncio.shield(task))
 
+    @websocket_api.websocket_command(
+        {
+            vol.Required("type"): "rexlite/knx/scene_selection",
+            vol.Required("projectFingerprint"): vol.All(str, vol.Match(FINGERPRINT)),
+            vol.Required("excluded"): vol.All(
+                [
+                    {
+                        vol.Required("address"): vol.All(str, vol.Length(max=32)),
+                        vol.Required("sceneNumber"): vol.All(
+                            int, vol.Range(min=1, max=64)
+                        ),
+                    }
+                ],
+                vol.Length(max=MAX_SCENE_SELECTION),
+            ),
+        }
+    )
+    @websocket_api.require_admin
+    @websocket_api.async_response
+    async def scene_selection(hass: Any, connection: Any, msg: dict) -> None:
+        # The SI's choice of which ETS scenes (wall keys) Home Assistant gets; the
+        # rest stay in the project but out of the generated YAML. Redeploys at once.
+        try:
+            excluded = [
+                scene_key(item["address"], item["sceneNumber"])
+                for item in msg["excluded"]
+            ]
+        except DeploymentError as err:
+            connection.send_error(msg["id"], "invalid_scene_selection", str(err))
+            return
+        task = hass.async_create_task(
+            deployer.deploy(msg["projectFingerprint"], scene_selection=excluded),
+            "REXLiTE KNX scene selection",
+        )
+        connection.send_result(msg["id"], await asyncio.shield(task))
+
     for command in (
         capabilities,
         gateway_scan,
@@ -1827,6 +1953,7 @@ def register_websocket_commands(hass: Any) -> ProjectDeployer:
         deploy,
         status,
         manual,
+        scene_selection,
         upload,
     ):
         websocket_api.async_register_command(hass, command)

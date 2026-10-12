@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- KNX 部署：SI 在平台選「哪些 ETS 情境（REXLiTE 3TS 下方的情境鍵）進 HA」。所有鍵照舊都在 `.knxproj` 裡；新指令 `rexlite/knx/scene_selection`（admin）帶 `excluded: [{address, sceneNumber}]`，沒選的 scene 不寫進產生的 knx YAML、`skipped` 回報 `scene_not_selected`，並立刻重新部署。
+- 選擇存在部署 manifest（`sceneSelection`），重試、mapper 升版、同一戶重新上傳都沿用；部署失敗回滾時選擇一起還原。部署結果與 `project_deployment_status` 多回 `sceneKeys`（每個 ETS scene 的名稱、位址、場景號、`selected`），平台據此顯示勾選。`project_capabilities` 多 `sceneSelection: true`。
+- 只有被 SI 排除的 scene 時，部署狀態算 `completed`（是選擇，不是沒映射到）。
+
 ## 0.1.27
 
 - KNX mapper（`MAPPER_REVISION` 10）：乾接點窗簾 `CurtainImpulse` 的「關脈衝」也接受 DPT 1.008（Down＝1）。REXLiTE ETS App 0.18.3 起，KAA 關通道直接聽牆面「上下」位址（按「關」本來就送 1），7TS 不再為「關」花一個 LOGIC，一台 7TS 從 2 個窗簾變成 4 個；同一個物件只能有一種 DPT，所以「關脈衝」改宣告為 1.008。原本 1.001 的專案（App 0.14–0.18.2）照舊產生「關」按鈕。
