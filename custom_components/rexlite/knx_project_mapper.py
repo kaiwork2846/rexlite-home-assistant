@@ -734,12 +734,16 @@ class _Planner:
             ):
                 continue
             linked = {obj["_object_id"]: obj for obj in self.objects[address]}
+            # A wall key's own scene (knx_project_metadata.WALL_KEY_APPLICATIONS)
+            # has no receiver: the homeowner's automation in HA is what it runs.
             if not all(
                 sender in linked
                 and _dict(linked[sender].get("flags")).get("communication") is True
                 and _dict(linked[sender].get("flags")).get("transmit") is True
                 for sender in sender_ids
-            ) or not self.has_flag(address, "write"):
+            ) or not (
+                self.has_flag(address, "write") or ga.get("scene_wall_key") is True
+            ):
                 continue
             choices = self.dpt_choices[address]
             if not choices or not choices <= {(17, 1), (18, 1)}:

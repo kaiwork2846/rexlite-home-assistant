@@ -753,6 +753,34 @@ class KNXProjectMappingTests(unittest.TestCase):
         p["communication_objects"]["receiver"]["dpts"] = [{"main": 5, "sub": 1}]
         self.assertEqual(mapper.plan_project(p)["entityCount"], 0)
 
+    def test_a_wall_keys_own_scene_needs_no_receiver(self):
+        group = ga("0/7/1", "1F-客廳 面板1 按鈕-2", 18, 1)
+        group.update(
+            scene_number=1,
+            scene_number_source="ets-sender-parameter",
+            scene_sender_ids=["key"],
+        )
+        p = project(
+            group,
+            objects={
+                "key": {
+                    "group_address_links": ["0/7/1"],
+                    "dpts": [{"main": 18, "sub": 1}],
+                    "flags": {"communication": True, "transmit": True},
+                },
+            },
+        )
+        self.assertEqual(mapper.plan_project(p)["entityCount"], 0)
+        group["scene_wall_key"] = True
+        result = mapper.plan_project(p)
+        scene = result["config"]["scene"][0]
+        self.assertEqual(
+            (scene["address"], scene["scene_number"], scene["name"]),
+            ("0/7/1", 1, "1F-客廳 面板1 按鈕-2"),
+        )
+        group["scene_wall_key"] = "yes"
+        self.assertEqual(mapper.plan_project(p)["entityCount"], 0)
+
     def test_exact_conventions_map_five_entities_and_leave_scene_unresolved(self):
         result = mapper.plan_project(sample_conventions())
         self.assertEqual(result["entityCount"], 5)

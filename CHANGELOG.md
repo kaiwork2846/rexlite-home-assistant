@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.29
+
+- KNX 情境：GVS CHPB／CHPBD 按鍵面板的「Scene control」鍵也從發送端參數讀場景號（`knx_project_metadata`）。CHPB 沒有 module，每顆鍵的情境物件對應自己那一支的 `8 bit scene number`（新表 `BUTTON_SCENE_LAYOUTS`：2／4／6／8 鍵 Secure 版與 8 鍵非 Secure 版；1 鍵與 6 鍵第 5～6 鍵用另一組 ref）；CHPBD 加入 `00BB-12`、`00BC-10`、`00BD-10` 三個版本（同 `00BD-11` 的版面）。
+- 牆面按鍵的情境物件只有發送（產品資料把 Write 關掉），位址上沒有 KNX 接收端。發送端**全部**是這些按鍵時，`enrich_project` 標記 `scene_wall_key`，mapper 不再要求位址上有可寫物件，照樣產生 HA `scene`：這種情境是屋主在 HA／MAXIS APP 掛自動化的觸發點（REXLiTE ETS App 0.33.0 起，7TS 方案的 CHPB 鍵可設成情境鍵）。其他情境照舊要有接收端。
+- 讀應用程式 XML 改成串流解析（單檔上限 32 MB、合計 128 MB；一樣拒絕 DTD／entity、只收 UTF-8、Id 不可重複）：CHPB 的應用程式每個約 8.5 MB，只把 CHPB 加進表、照原本 8 MB 上限的話，有 CHPB 的專案會整份放棄、連 3TS 的情境都讀不到。某個應用程式證明不了時，現在只有它自己的鍵不出 scene，不再連累其他設備。
+- 新的情境只在**重新上傳** `.knxproj` 時生效（場景號在上傳解析時讀）；`MAPPER_REVISION` 不變。用 120 份案場 ETS 專案（98 份可解析）比對，輸出與 0.1.28 完全相同。
+
 ## 0.1.28
 
 - 新增 Frigate 攝影機橋接 `rexlite/frigate/*`（見 `docs/frigate-bridge.md`）：運營平台與 MAX'Is Tool App 經主機把 IP 攝影機加入同機的 Frigate。主機端做 ONVIF WS-Discovery（排除 Windows／NAS 的 WSD 主機）、ONVIF 取串流（攝影機時鐘簽章、2020／80／8000／8899 埠）、RTSP DESCRIBE 驗證帳密與路徑（TP-Link `/stream1`、`/stream2` 等常見路徑備援），再寫入 go2rtc restream 與攝影機設定、重新啟動 Frigate，確認有畫面才算完成，否則還原。
