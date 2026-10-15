@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.30
+
+- 新增 `rexlite/hacs/bind`（admin，見 `docs/hacs-bind.md`）：MAX'Is運營平台用公司的 GitHub 機器帳號權杖直接綁定 HACS，經銷商不必有 GitHub 帳號。建立與 HACS 自己的裝置登入流程相同的設定項目（`token`、`experimental`）；已有設定項目時結束等待中的 reauth，經 HA 卸載後更新權杖再載入（HACS 的 update listener 會繞過 HA 的 setup lock 自行重載，直接更新已載入的設定項目會撞成 failed_unload）。
+- 權杖先向 GitHub `/rate_limit` 驗證（無效、達上限、連不上各有錯誤碼）；不寫入日誌、不回傳，只存在 HACS 的設定項目。指令結構只收 `str`，避免 HA 的 invalid_format 訊息把權杖帶回。
+- 需要 HA MCP `/ha/hacs` 的 `bind` 與運營平台後端 `/remote-connections/:agentId/hacs`；舊版主機回 `unknown_command`，平台改走 GitHub 登入。
+
 ## 0.1.29
 
 - KNX 情境：GVS CHPB／CHPBD 按鍵面板的「Scene control」鍵也從發送端參數讀場景號（`knx_project_metadata`）。CHPB 沒有 module，每顆鍵的情境物件對應自己那一支的 `8 bit scene number`（新表 `BUTTON_SCENE_LAYOUTS`：2／4／6／8 鍵 Secure 版與 8 鍵非 Secure 版；1 鍵與 6 鍵第 5～6 鍵用另一組 ref）；CHPBD 加入 `00BB-12`、`00BC-10`、`00BD-10` 三個版本（同 `00BD-11` 的版面）。
