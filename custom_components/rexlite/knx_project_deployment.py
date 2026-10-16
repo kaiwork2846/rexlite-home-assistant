@@ -11,6 +11,7 @@ import asyncio
 import base64
 import hashlib
 import json
+import logging
 import os
 import re
 import stat
@@ -36,6 +37,9 @@ MAX_PROJECT_BYTES = 100 * 1024 * 1024
 FINGERPRINT = re.compile(r"^[0-9a-f]{64}$")
 MAX_FILE_BYTES = 8 * 1024 * 1024
 MINIMUM_KNX_CORE_VERSION = "2026.1.0"
+DEFAULT_BUTTON_PAYLOAD = 1
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class DeploymentError(Exception):
@@ -331,8 +335,13 @@ def row_identity(
         canonical = _address(str(value)) if value is not None else None
         return format_native_identity(canonical, address_format) if canonical else None
 
-    if platform in ("light", "switch", "button"):
+    if platform in ("light", "switch"):
         return primary("address")
+    if platform == "button":
+        # KNX buttons are keyed by address and the raw payload they send.
+        address = primary("address")
+        payload = button_payload(row)
+        return f"{address}_{payload}" if address and payload is not None else None
     if platform in ("sensor", "binary_sensor"):
         return primary("state_address")
     if platform == "cover":
@@ -357,6 +366,27 @@ def row_identity(
         if any(part is not None for part in parts)
         else None
     )
+
+
+def button_payload(row: dict) -> int | None:
+    """The raw payload HA's KNX button schema derives from a YAML row."""
+    if (dpt := row.get("type")) is not None:
+        try:
+            from xknx.dpt import DPTBase
+
+            transcoder = DPTBase.parse_transcoder(dpt)
+            raw = transcoder.validate_payload(transcoder.to_knx(row.get("value")))
+        except Exception:  # noqa: BLE001 - an unknown DPT has no known identity
+            return None
+        return int.from_bytes(raw, byteorder="big")
+    payload = row.get("payload", DEFAULT_BUTTON_PAYLOAD)
+    if isinstance(payload, bool):
+        return None
+    try:
+        payload = int(payload)
+    except (TypeError, ValueError):
+        return None
+    return payload if payload >= 0 else None
 
 
 def raw_platform_lists(config: dict | None) -> dict:
@@ -1048,6 +1078,20 @@ class ProjectDeployer:
                     available += 1
         return {"loadedCount": loaded, "availableCount": available}
 
+    def _missing_entities(self, manifest: dict) -> list[str]:
+        """Name the managed entities HA has not loaded, for the log only."""
+        from homeassistant.helpers import entity_registry as er
+
+        registry = er.async_get(self.hass)
+        result = []
+        for entity in manifest.get("entities", []):
+            uid = manifest_identity(entity, manifest, self._identity_format())
+            entity_id = registry.async_get_entity_id(entity["platform"], "knx", uid)
+            state = self.hass.states.get(entity_id) if entity_id else None
+            if state is None or getattr(state, "attributes", {}).get("restored"):
+                result.append(f"{entity['platform']}:{entity_id or uid}")
+        return result
+
     def _registry_entry(self, record: dict) -> Any:
         """Resolve only the exact registry identity recorded by this writer."""
         from homeassistant.helpers import entity_registry as er
@@ -1174,6 +1218,10 @@ class ProjectDeployer:
 
     async def _read_previous(self) -> dict | None:
         previous = await self._io(self.files.read_json, MANIFEST)
+        if previous and not previous.get("managedDigest"):
+            # A first deployment that rolled back left no YAML behind; older
+            # versions still recorded it here, which is no deployment at all.
+            previous = None
         generated = await self._io(self.files.read, GENERATED)
         if (
             previous
@@ -1311,18 +1359,11 @@ class ProjectDeployer:
                 if current != after:
                     raise DeploymentError("rollback_blocked_by_external_edit")
                 self.files.write(relative, before)
-            self.files.write_json(
-                MANIFEST,
-                journal.get("previous")
-                or {
-                    "status": "failed",
-                    "stage": "rolled_back",
-                    "entityCount": 0,
-                    "loadedCount": 0,
-                    "availableCount": 0,
-                    "skipped": [],
-                },
-            )
+            if previous := journal.get("previous"):
+                self.files.write_json(MANIFEST, previous)
+            else:
+                # The failure itself is kept in LAST_ATTEMPT.
+                self.files.write(MANIFEST, None)
 
         await self._io(restore)
         for record in reversed(journal.get("registryChanges", [])):
@@ -1651,12 +1692,23 @@ class ProjectDeployer:
                         raise DeploymentError("knx_reload_failed")
                 manifest.update(stage="verifying")
                 self.current = self._public(manifest)
-                async with asyncio.timeout(20):
-                    while True:
-                        counts = self._counts(manifest)
-                        if counts["loadedCount"] == plan["entityCount"]:
-                            break
-                        await asyncio.sleep(0.25)
+                counts = {"loadedCount": 0, "availableCount": 0}
+                try:
+                    async with asyncio.timeout(20):
+                        while True:
+                            counts = self._counts(manifest)
+                            if counts["loadedCount"] == plan["entityCount"]:
+                                break
+                            await asyncio.sleep(0.25)
+                except TimeoutError as err:
+                    _LOGGER.warning(
+                        "KNX deployment: %s of %s managed entities loaded; "
+                        "not loaded: %s",
+                        counts["loadedCount"],
+                        plan["entityCount"],
+                        ", ".join(self._missing_entities(manifest)),
+                    )
+                    raise DeploymentError("managed_entities_not_loaded") from err
                 await self._verify_configuration(manifest)
                 current_project = await self._module().project.get_knxproject()
                 if (
@@ -1692,15 +1744,17 @@ class ProjectDeployer:
                 await self._io(self.files.write, JOURNAL, None)
                 return self._public(manifest)
             except Exception as err:
-                error = (
-                    str(err)
-                    if isinstance(err, DeploymentError)
-                    else "deployment_failed"
-                )
+                if isinstance(err, DeploymentError):
+                    error = str(err)
+                    _LOGGER.warning("KNX deployment failed: %s", error)
+                else:
+                    error = "deployment_failed"
+                    _LOGGER.exception("KNX deployment failed unexpectedly")
                 if journal:
                     try:
                         await self._rollback(journal)
                     except Exception:
+                        _LOGGER.exception("KNX deployment rollback failed")
                         error += ":rollback_failed"
                 manifest.update(
                     status="failed",

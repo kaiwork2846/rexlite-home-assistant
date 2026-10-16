@@ -124,6 +124,16 @@ async def main() -> None:
             {"name": "Cover no position", "move_long_address": "2/0/4"},
         ],
         "scene": [{"name": "Scene", "address": "4/0/1", "scene_number": 13}],
+        "button": [
+            {"name": "Button", "address": "6/0/1"},
+            {"name": "Button zero", "address": "6/0/2", "payload": 0},
+            {
+                "name": "Button value",
+                "address": "6/0/3",
+                "value": 50,
+                "type": "percent",
+            },
+        ],
         "climate": [
             {
                 "name": "Climate",
@@ -160,7 +170,10 @@ async def main() -> None:
                     class_name = "KnxYaml" + "".join(
                         word.title() for word in platform.split("_")
                     )
-                    constructor = getattr(component, class_name)
+                    # Core 2026.1-7 names the YAML button class KNXButton.
+                    constructor = getattr(component, class_name, None) or getattr(
+                        component, "KNX" + platform.title()
+                    )
                     with patch.object(
                         knx_entity,
                         "async_get_current_platform",
