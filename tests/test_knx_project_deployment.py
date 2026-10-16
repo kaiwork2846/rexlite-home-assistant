@@ -155,6 +155,10 @@ class IdentityTests(unittest.TestCase):
                 "3/0/1_3/0/2_3/0/3_None",
             ),
             ("scene", {"address": "4/0/1", "scene_number": 13}, "4/0/1_13"),
+            # HA keys a YAML button by address and payload (default 1).
+            ("button", {"address": "1/3/3"}, "1/3/3_1"),
+            ("button", {"address": "1/3/4", "payload": 0}, "1/3/4_0"),
+            ("button", {"address": "1/3/5", "payload": True}, None),
         ]
         for platform, config, expected in cases:
             with self.subTest(platform=platform, config=config):
@@ -162,6 +166,21 @@ class IdentityTests(unittest.TestCase):
         self.assertEqual(
             m.row_identity("light", {"address": "1/0/1", "unique_id": "custom"}),
             "custom",
+        )
+
+    def test_button_identity_follows_value_and_type(self):
+        try:
+            import xknx  # noqa: F401
+        except ImportError:
+            self.skipTest("xknx is not installed")
+        row = {"address": "1/3/5", "value": 50, "type": "percent"}
+        self.assertEqual(m.row_identity("button", row), "1/3/5_128")
+        row["type"] = "not-a-dpt"
+        self.assertIsNone(m.row_identity("button", row))
+
+    def test_short_format_button_identity(self):
+        self.assertEqual(
+            m.row_identity("button", {"address": "1/3/3"}, "SHORT"), "1/771_1"
         )
 
     def test_capability_versions_reject_unknown_or_pre_release_core(self):
@@ -891,6 +910,75 @@ class DeploymentTests(unittest.IsolatedAsyncioTestCase):
         self.states["binary_sensor.old-fb"].attributes["restored"] = True
         self.module.config_yaml["binary_sensor"] = old["config"]["binary_sensor"]
         self.assertEqual(self.writer._registry_retirements(previous, manifest), [])
+
+    async def test_failed_first_deployment_does_not_block_2026_8_retry(self):
+        native = m.core_compatibility("2026.8.0")
+        self.fail_reload = True
+        with patch.object(self.writer, "_compatibility", return_value=native):
+            failed = await self.writer.deploy(FINGERPRINT)
+            self.assertEqual(
+                (failed["status"], failed["stage"]), ("failed", "rolled_back")
+            )
+            # The failure is reported, but there is no deployment to inherit.
+            self.assertIsNone(self.writer.files.read_json(m.MANIFEST))
+            self.assertEqual(
+                (await self.writer.status(FINGERPRINT))["error"], "knx_reload_failed"
+            )
+            self.assertIsNone(await self.writer._read_previous())
+            retry = await self.writer.deploy(FINGERPRINT)
+        self.assertEqual(retry["status"], "completed", retry)
+        self.assertEqual(
+            self.writer.files.read_json(m.MANIFEST)["identityMode"], "native"
+        )
+
+    async def test_rolled_back_record_from_0_1_30_is_not_a_deployment(self):
+        self.writer.files.write_json(
+            m.MANIFEST,
+            {
+                "status": "failed",
+                "stage": "rolled_back",
+                "entityCount": 0,
+                "loadedCount": 0,
+                "availableCount": 0,
+                "skipped": [],
+            },
+        )
+        self.assertIsNone(await self.writer._read_previous())
+        with patch.object(
+            self.writer, "_compatibility", return_value=m.core_compatibility("2026.8.0")
+        ):
+            self.writer._validate_import_identity(
+                await self.writer._read_previous(), self.project, "native"
+            )
+            result = await self.writer.deploy(FINGERPRINT)
+        self.assertEqual(result["status"], "completed", result)
+
+    async def test_entities_not_loaded_are_named_in_the_log(self):
+        real_timeout = asyncio.timeout
+        with (
+            patch.object(
+                self.writer,
+                "_counts",
+                return_value={"loadedCount": 1, "availableCount": 1},
+            ),
+            patch.object(m.asyncio, "timeout", lambda delay: real_timeout(0.01)),
+            self.assertLogs(m._LOGGER, "WARNING") as logs,
+        ):
+            result = await self.writer.deploy(FINGERPRINT)
+        self.assertEqual(result["error"], "managed_entities_not_loaded", result)
+        self.assertEqual(result["stage"], "rolled_back", result)
+        self.assertIn("1 of 2 managed entities loaded", logs.output[0])
+
+    async def test_unexpected_failure_is_logged_with_traceback(self):
+        with (
+            patch.object(
+                self.writer, "_registry_restorations", side_effect=RuntimeError("boom")
+            ),
+            self.assertLogs(m._LOGGER, "ERROR") as logs,
+        ):
+            result = await self.writer.deploy(FINGERPRINT)
+        self.assertEqual(result["error"], "deployment_failed", result)
+        self.assertIn("RuntimeError: boom", "\n".join(logs.output))
 
     async def test_upgrade_verification_failure_never_retires_old_entities(self):
         old, new = self.pairing_plans()

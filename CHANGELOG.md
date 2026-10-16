@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.31
+
+- 修正 KNX 部署在 HA 2026.8（及 2026.1～2026.7）一有窗簾按鈕就失敗：HA 的 YAML `button` unique_id 是「位址_payload」（例：`1/3/3_1`，`payload` 預設 1，`value`＋`type` 換算成原始 payload），部署端卻只用位址，按鈕永遠對不上，驗證階段等滿 20 秒後回滾成 `deployment_failed`。D3-7F（HA 2026.8.0、14 燈＋6 按鈕＋2 情境）兩次部署都是這樣失敗。HA 2026.9 起用自訂 unique_id，不受影響。
+- 驗證階段逾時改回 `managed_entities_not_loaded`，並在 HA 日誌寫出「N／M 個已載入」與沒載入的實體；其他非預期例外改用 `_LOGGER.exception` 留下 traceback（之前只回 `deployment_failed`、日誌什麼都沒有）。回傳給平台的錯誤碼仍只有代碼，不帶內容。
+- 第一次部署失敗回滾後，不再在 `deployment.json` 留一筆沒有 `identityMode` 的失敗記錄（失敗結果照樣在 `last_attempt.json`）。那筆記錄會被當成舊的自訂 ID 部署，讓 HA 2026.8 之後每次匯入都被 `managed_custom_identity_requires_newer_core` 擋下；0.1.30 已留下的這種記錄（沒有 `managedDigest`）現在直接忽略，不必手動刪檔。
+
 ## 0.1.30
 
 - 新增 `rexlite/hacs/bind`（admin，見 `docs/hacs-bind.md`）：MAX'Is運營平台用公司的 GitHub 機器帳號權杖直接綁定 HACS，經銷商不必有 GitHub 帳號。建立與 HACS 自己的裝置登入流程相同的設定項目（`token`、`experimental`）；已有設定項目時結束等待中的 reauth，經 HA 卸載後更新權杖再載入（HACS 的 update listener 會繞過 HA 的 setup lock 自行重載，直接更新已載入的設定項目會撞成 failed_unload）。
