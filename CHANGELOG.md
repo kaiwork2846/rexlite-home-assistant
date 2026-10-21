@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.32
+
+- KNX mapper（`MAPPER_REVISION` 11）：冷氣風速接受 DPT 5.100「fan stage」（0＝自動、1～4＝低／中／高／超高），輸出 HA `fan_speed_mode: step`、`fan_max_step: 4`、`fan_zero_mode: auto`；DPT 5.001 百分比照舊。REXLiTE ETS App 0.35.0 起，GVS BTPG-04/03.1（KNX-485）接大金冷氣時「風速／風速狀態」是 5.100，7TS／3TS 畫面也改送檔位；Contract 與安裝商方言（`FAN`／`FAN-FB`，例：HQ-2F 的大金集控器）都適用。之前這種風速被當成型別不符整個丟掉，冷氣在 HA 沒有風速可調。
+- 同一台冷氣的風速命令與回報一個是 5.001、一個是 5.100 時：Contract Function 整個略過（`role_datapoint_type_mismatch`）；安裝商方言只拿掉風速，冷氣照樣產生。5.010（原始計數）仍不接受。
+- `MAPPER_REVISION` 從 10 升到 11：已匯入的專案下次部署會重新規劃（有 5.100 風速的冷氣多出風速，其他輸出不變）。
+
 ## 0.1.31
 
 - 修正 KNX 部署在 HA 2026.8（及 2026.1～2026.7）一有窗簾按鈕就失敗：HA 的 YAML `button` unique_id 是「位址_payload」（例：`1/3/3_1`，`payload` 預設 1，`value`＋`type` 換算成原始 payload），部署端卻只用位址，按鈕永遠對不上，驗證階段等滿 20 秒後回滾成 `deployment_failed`。D3-7F（HA 2026.8.0、14 燈＋6 按鈕＋2 情境）兩次部署都是這樣失敗。HA 2026.9 起用自訂 unique_id，不受影響。

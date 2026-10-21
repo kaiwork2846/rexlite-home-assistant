@@ -243,10 +243,10 @@ CONTRACT_V1_LOOPS = [
 ]
 
 
-def contract_v1_project():
+def contract_v1_project(loops=None):
     """Synthetic xknxproject output shaped like a Contract v1 ETS6 export."""
     groups, objects, functions, table = [], {}, {}, {}
-    for loop, (kind, name, members) in enumerate(CONTRACT_V1_LOOPS, start=1):
+    for loop, (kind, name, members) in enumerate(loops or CONTRACT_V1_LOOPS, start=1):
         device = f"1.1.{loop}"
         refs = {}
         for offset, (suffix, (main, sub), role, feedback) in enumerate(members):
@@ -293,6 +293,22 @@ def has_ha_distribution():
     except importlib.metadata.PackageNotFoundError:
         return False
     return True
+
+
+def contract_aircon(fan, fan_state):
+    """The Contract v1 冷氣 loop with its fan members of the given DPTs."""
+    _, name, members = next(loop for loop in CONTRACT_V1_LOOPS if loop[0] == "FT-0")
+    dpts = {"風速": fan, "風速狀態": fan_state}
+    return [
+        (
+            "FT-0",
+            name,
+            [
+                (suffix, dpts.get(suffix, dpt), role, feedback)
+                for suffix, dpt, role, feedback in members
+            ],
+        )
+    ]
 
 
 class KNXProjectMappingTests(unittest.TestCase):
@@ -686,6 +702,58 @@ class KNXProjectMappingTests(unittest.TestCase):
         # fallback() is free to give it its own (unrelated-role) skip reason.
         fan_address = table[(1, "Climate-FAN")]
         self.assertIn(fan_address, {s["address"] for s in result["skipped"]})
+
+    def test_contract_aircon_fan_stage_is_step_mode_with_auto_zero(self):
+        # GVS BTPG (REXLiTE ETS App 0.35.0): the fan is a DPT 5.100 stage,
+        # 0 auto and 1..4 low..super high.
+        p, table = contract_v1_project(contract_aircon((5, 100), (5, 100)))
+        result = mapper.plan_project(p)
+        climate = result["config"]["climate"][0]
+        self.assertEqual(climate["fan_speed_address"], table[("1F-客廳-冷氣1", "風速")])
+        self.assertEqual(
+            climate["fan_speed_state_address"], table[("1F-客廳-冷氣1", "風速狀態")]
+        )
+        self.assertEqual(
+            (
+                climate["fan_speed_mode"],
+                climate["fan_max_step"],
+                climate["fan_zero_mode"],
+            ),
+            ("step", 4, "auto"),
+        )
+        self.assertEqual(result["skipped"], [])
+
+    def test_contract_aircon_percentage_fan_keeps_the_default_mode(self):
+        p, _ = contract_v1_project(contract_aircon((5, 1), (5, 1)))
+        climate = mapper.plan_project(p)["config"]["climate"][0]
+        self.assertNotIn("fan_speed_mode", climate)
+        self.assertNotIn("fan_max_step", climate)
+
+    def test_contract_aircon_fan_stage_and_percentage_mixed_is_rejected(self):
+        p, _ = contract_v1_project(contract_aircon((5, 1), (5, 100)))
+        result = mapper.plan_project(p)
+        self.assertNotIn("climate", result["config"])
+        self.assertIn(
+            "role_datapoint_type_mismatch", {s["reason"] for s in result["skipped"]}
+        )
+
+    def test_climate_dialect_fan_stage_is_step_mode(self):
+        # HQ-2F's BTPG Daikin gateway exports "AC-01, FAN/FAN-FB" as DPT 5.100.
+        p, table = independent_units(
+            "13F-A12",
+            [
+                ("Climate-SW", 1, 1),
+                ("Climate-MODE", 20, 105),
+                ("Climate-FAN", 5, 100),
+                ("Climate-FAN-FB", 5, 100),
+                *CLIMATE_TEMPERATURES,
+            ],
+            count=1,
+        )
+        climate = mapper.plan_project(p)["config"]["climate"][0]
+        self.assertEqual(climate["fan_speed_address"], table[(1, "Climate-FAN")])
+        self.assertEqual(climate["fan_speed_mode"], "step")
+        self.assertEqual(climate["fan_zero_mode"], "auto")
 
     def test_multiple_climate_units_share_one_prefix_split_by_proven_channel(self):
         p, table = independent_units(
