@@ -17,7 +17,7 @@ from typing import Any
 
 MAX_GROUP_ADDRESSES = 65535
 MAX_ENTITIES = 2000
-MAPPER_REVISION = 11
+MAPPER_REVISION = 12
 
 # DPT 5.100 "fan stage": GVS BTPG air-conditioner gateways (REXLiTE ETS App
 # 0.35.0) and the HERA 7TS/3TS screens send 0 for auto and 1..4 for low,
@@ -169,7 +169,29 @@ NON_ENTITY_FUNCTION_ROLES = {
 # still be represented when a communication object proves this is telemetry.
 MEASUREMENT_DPTS = {
     (9, sub)
-    for sub in (1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29)
+    for sub in (
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        10,
+        11,
+        20,
+        21,
+        22,
+        23,
+        24,
+        25,
+        26,
+        27,
+        28,
+        29,
+        30,
+    )
 }
 TELEMETRY_DPTS = MEASUREMENT_DPTS | {
     (5, 1),

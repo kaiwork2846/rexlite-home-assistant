@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.33
+
+- KNX mapper（`MAPPER_REVISION` 12）：DPT 9.030（μg/m³，PM2.5／PM10）列為量測值，輸出 HA `sensor`（`type: "9.030"`）。之前只收到 9.029，GVS CSMS 多功能感測器（9 合 1）的 PM2.5、PM10 被當成 `insufficient_supported_entity_metadata` 跳過；CO2、TVOC、甲醛（9.008 ppm）本來就會出。REXLiTE KNX Contract 感測量測新增 CO2／PM2.5／PM10／TVOC／甲醛（ETS App 0.36.0）。
+- `MAPPER_REVISION` 從 11 升到 12：已匯入的專案下次部署會重新規劃，有 9.030 位址的多出感測器，其他輸出不變。
+
 ## 0.1.32
 
 - KNX mapper（`MAPPER_REVISION` 11）：冷氣風速接受 DPT 5.100「fan stage」（0＝自動、1～4＝低／中／高／超高），輸出 HA `fan_speed_mode: step`、`fan_max_step: 4`、`fan_zero_mode: auto`；DPT 5.001 百分比照舊。REXLiTE ETS App 0.35.0 起，GVS BTPG-04/03.1（KNX-485）接大金冷氣時「風速／風速狀態」是 5.100，7TS／3TS 畫面也改送檔位；Contract 與安裝商方言（`FAN`／`FAN-FB`，例：HQ-2F 的大金集控器）都適用。之前這種風速被當成型別不符整個丟掉，冷氣在 HA 沒有風速可調。

@@ -950,6 +950,33 @@ class KNXProjectMappingTests(unittest.TestCase):
             {s["reason"] for s in result["skipped"]}, {"role_datapoint_type_mismatch"}
         )
 
+    def test_multifunctional_sensor_measurements_are_sensors(self):
+        # GVS CSMS (9-in-1): CO2/TVOC/formaldehyde in ppm (9.008), PM2.5/PM10 in
+        # ug/m3 (9.030), each a read-only measurement.
+        rows = [
+            ("6/1/5", "CO2", 9, 8),
+            ("6/1/6", "PM2.5", 9, 30),
+            ("6/1/7", "PM10", 9, 30),
+            ("6/1/8", "TVOC", 9, 8),
+            ("6/1/9", "甲醛", 9, 8),
+        ]
+        groups = [ga(a, f"1F-餐廳-多功能 {n}", m, s) for a, n, m, s in rows]
+        objects = {
+            f"1.1.31/O-{a}": {
+                "device_address": "1.1.31",
+                "dpts": [{"main": m, "sub": s}],
+                "flags": {"communication": True, "read": True, "transmit": True},
+                "group_address_links": [a],
+            }
+            for a, _, m, s in rows
+        }
+        result = mapper.plan_project(project(*groups, objects=objects))
+        self.assertEqual(
+            {row["state_address"]: row["type"] for row in result["config"]["sensor"]},
+            {a: f"{m}.{s:03d}" for a, _, m, s in rows},
+        )
+        self.assertEqual(result["skipped"], [])
+
     def test_fb_named_binary_address_without_objects_is_a_read_only_sensor(self):
         result = mapper.plan_project(
             project(ga("1/1/0", "Zone-B-DoorSensor-B-Sensor-ACTIVE-FB", 1, 1))
