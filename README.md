@@ -4,7 +4,7 @@
   <img src="assets/logo.png" width="250" height="100" alt="REXLiTE logo">
 </p>
 
-**目前版本：`0.1.31`**（每版變更見 [CHANGELOG.md](CHANGELOG.md)；HACS 依 GitHub Release 標籤 `vX.Y.Z` 更新）
+**目前版本：`0.1.32`**（每版變更見 [CHANGELOG.md](CHANGELOG.md)；HACS 依 GitHub Release 標籤 `vX.Y.Z` 更新）
 
 REXLiTE AI 為居家與場域提供安全、穩定的雲端服務。完成啟用後，使用者可依需求隨時開啟或關閉雲端服務，並持續掌握服務狀態。
 

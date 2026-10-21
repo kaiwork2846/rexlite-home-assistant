@@ -17,7 +17,14 @@ from typing import Any
 
 MAX_GROUP_ADDRESSES = 65535
 MAX_ENTITIES = 2000
-MAPPER_REVISION = 10
+MAPPER_REVISION = 11
+
+# DPT 5.100 "fan stage": GVS BTPG air-conditioner gateways (REXLiTE ETS App
+# 0.35.0) and the HERA 7TS/3TS screens send 0 for auto and 1..4 for low,
+# medium, high and super high. HA's KNX climate takes that as fan_speed_mode
+# "step" with 0 meaning auto, instead of the DPT 5.001 percentage.
+FAN_STAGE = (5, 100)
+FAN_STAGE_MODE = {"fan_speed_mode": "step", "fan_max_step": 4, "fan_zero_mode": "auto"}
 
 # role: (YAML field, allowed exact DPTs). Names here are semantic roles, not GA
 # names. Standard ETS roles include AbsoluteSetvalueControl/ActualDimmingValue.
@@ -50,8 +57,8 @@ ROLE_FIELDS = {
     "operationmode": ("operation_mode_address", {(20, 102)}),
     "operationmodestate": ("operation_mode_state_address", {(20, 102)}),
     "hvacmode": ("operation_mode_address", {(20, 102)}),
-    "fanspeed": ("fan_speed_address", {(5, 1)}),
-    "fanspeedstate": ("fan_speed_state_address", {(5, 1)}),
+    "fanspeed": ("fan_speed_address", {(5, 1), FAN_STAGE}),
+    "fanspeedstate": ("fan_speed_state_address", {(5, 1), FAN_STAGE}),
     "scene": ("address", {(17, 1), (18, 1)}),
     "impulseopen": ("open_impulse_address", {(1, 1)}),
     # The close impulse may also be declared 1.008 (Down = 1): no 7TS logic is spent
@@ -216,14 +223,15 @@ ABBREVIATED_ROLES = {
 # (VAL-REAL-FB) and target-temperature feedback (VAL-FB) are proven on the same
 # channel. "VAL" is only a setpoint when it carries DPT 9.001; exports that use
 # a raw 5.010 "VAL" are left unmapped. Controller mode is DPT 20.105 (not the
-# DPT 20.102 operation mode) and fan speed is DPT 5.001 only. "SW" itself is the
-# anchor command and is intentionally absent here, mirroring ABBREVIATED_ROLES.
+# DPT 20.102 operation mode) and fan speed is DPT 5.001 or the 5.100 fan stage.
+# "SW" itself is the anchor command and is intentionally absent here, mirroring
+# ABBREVIATED_ROLES.
 CLIMATE_ROLE_FIELDS = {
     "SW-FB": ("on_off_state_address", {(1, 1), (1, 11)}),
     "MODE": ("controller_mode_address", {(20, 105)}),
     "MODE-FB": ("controller_mode_state_address", {(20, 105)}),
-    "FAN": ("fan_speed_address", {(5, 1)}),
-    "FAN-FB": ("fan_speed_state_address", {(5, 1)}),
+    "FAN": ("fan_speed_address", {(5, 1), FAN_STAGE}),
+    "FAN-FB": ("fan_speed_state_address", {(5, 1), FAN_STAGE}),
     "VAL": ("target_temperature_address", {(9, 1)}),
     "VAL-FB": ("target_temperature_state_address", {(9, 1)}),
     "VAL-REAL-FB": ("temperature_address", {(9, 1)}),
@@ -715,7 +723,29 @@ class _Planner:
         # command addresses stay available to the plain fallbacks instead.
         if not fields.keys() >= CLIMATE_REQUIRED_FIELDS:
             return
+        if not self._fan_mode(fields):
+            # A percentage command with a stage feedback (or the reverse)
+            # cannot be one HA fan; the rest of the unit still is a climate.
+            for field in ("fan_speed_address", "fan_speed_state_address"):
+                fields.pop(field, None)
         self._add("climate", name, fields, "exact-name-object-channel")
+
+    def _fan_mode(self, fields: dict) -> bool:
+        """Say how HA reads the fan: a 5.100 stage pair is "step" mode.
+
+        False when the fan command and its feedback disagree on the type.
+        """
+        fan = [
+            fields[field]
+            for field in ("fan_speed_address", "fan_speed_state_address")
+            if field in fields
+        ]
+        stages = {self.dpts[address] == FAN_STAGE for address in fan}
+        if len(stages) > 1:
+            return False
+        if stages == {True}:
+            fields.update(FAN_STAGE_MODE)
+        return True
 
     def scene_metadata(self) -> None:
         """Use explicit sender parameters recovered from the same ETS archive."""
@@ -866,6 +896,11 @@ class _Planner:
                     fields["on_off_address"] = fields.pop("address")
                 if "state_address" in fields:
                     fields["on_off_state_address"] = fields.pop("state_address")
+                if not self._fan_mode(fields):
+                    for address in mentioned:
+                        self.issues.setdefault(address, "role_datapoint_type_mismatch")
+                    self.blocked.update(mentioned)
+                    return
             elif any(k in fields for k in required - {"temperature_address"}):
                 for address in mentioned:
                     self.issues.setdefault(address, "incomplete_climate_addresses")
@@ -941,6 +976,7 @@ class _Planner:
                 "operation_mode_state_address",
                 "fan_speed_address",
                 "fan_speed_state_address",
+                *FAN_STAGE_MODE,
             },
         }.get(platform)
         if allowed is not None and not fields.keys() <= allowed:
