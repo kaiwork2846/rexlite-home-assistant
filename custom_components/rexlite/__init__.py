@@ -77,6 +77,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: REXLiTEConfigEntry) -> b
         ),
         home_assistant_version=home_assistant_version,
         remote_admin_enabled=remote_admin_enabled,
+        entry_id=entry.entry_id,
     )
     session = async_get_clientsession(hass)
     try:

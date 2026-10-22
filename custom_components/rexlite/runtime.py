@@ -49,6 +49,7 @@ from .protocol import (
 _LOGGER = logging.getLogger(__name__)
 
 _REMOTE_ADMIN_DISABLED: Final = "remote administration is disabled"
+_SELF_RELOAD_RESPONSE: Final = b'{"require_restart": false}'
 _HOP_BY_HOP_HEADERS: Final = frozenset(
     {
         "connection",
@@ -77,6 +78,7 @@ class TunnelConfig:
     home_assistant_url: str
     home_assistant_version: str
     remote_admin_enabled: bool = False
+    entry_id: str = ""
     heartbeat_interval: float = 25.0
     request_timeout: float = 60.0
     reconnect_delay: float = 2.0
@@ -119,6 +121,19 @@ class RuntimeState:
         return "connected"
 
 
+def _create_loop_task(
+    coroutine: Coroutine[Any, Any, Any], name: str
+) -> asyncio.Task[Any]:
+    return asyncio.get_running_loop().create_task(coroutine, name=name)
+
+
+def _consume_detached_result(task: asyncio.Task[Any]) -> None:
+    """Retrieve a result nobody may await once its tunnel session ended."""
+
+    if not task.cancelled() and (error := task.exception()) is not None:
+        _LOGGER.debug("REXLiTE detached work ended: %s", type(error).__name__)
+
+
 @dataclass(slots=True)
 class _LocalStream:
     """One raw HTTP/WebSocket stream to Home Assistant."""
@@ -139,11 +154,19 @@ class REXLiTETunnelClient:
         task_factory: Callable[[Coroutine[Any, Any, Any], str], asyncio.Task[Any]],
         auth_failure_callback: Callable[[], None] | None = None,
         ipc_ip_detector: Callable[[str], IPCLanAddress | None] | None = None,
+        detached_task_factory: (
+            Callable[[Coroutine[Any, Any, Any], str], asyncio.Task[Any]] | None
+        ) = None,
+        self_reload_callback: Callable[[], None] | None = None,
     ) -> None:
         self._session = session
         self._config = config
         self._state_callback = state_callback
         self._task_factory = task_factory
+        # Work that must outlive this config entry's tasks, e.g. a Home
+        # Assistant request whose tunnel session ended mid-flight.
+        self._detached_task_factory = detached_task_factory or _create_loop_task
+        self._self_reload_callback = self_reload_callback
         self._auth_failure_callback = auth_failure_callback
         self._ipc_ip_detector = ipc_ip_detector or detect_ipc_lan_ipv4
         self._state = RuntimeState(remote_admin_enabled=config.remote_admin_enabled)
@@ -156,6 +179,7 @@ class REXLiTETunnelClient:
         self._handler_tasks: set[asyncio.Task[Any]] = set()
         self._streams: dict[str, _LocalStream] = {}
         self._stopping = False
+        self._closed = False
         self._connected_since: float | None = None
         self._last_connection_duration = 0.0
         self._last_ip_signature: tuple[str, str, str] | None = None
@@ -170,6 +194,8 @@ class REXLiTETunnelClient:
     async def async_start(self) -> None:
         """Start the tunnel supervisor once."""
 
+        if self._closed:
+            return
         if self._main_task is not None and not self._main_task.done():
             return
         self._stopping = False
@@ -178,6 +204,12 @@ class REXLiTETunnelClient:
         )
 
     async def async_stop(self) -> None:
+        """Stop the tunnel for good because the config entry is unloading."""
+
+        self._closed = True
+        await self._async_stop_session()
+
+    async def _async_stop_session(self) -> None:
         """Stop all background work and close active streams."""
 
         self._stopping = True
@@ -206,6 +238,16 @@ class REXLiTETunnelClient:
     async def async_set_remote_admin(self, enabled: bool) -> None:
         """Apply the remote-control gate using a clean gateway session."""
 
+        # A toggle that arrived through this tunnel loses its caller as soon as
+        # the old session closes, so the restart runs in its own task and can
+        # never leave the tunnel stopped halfway.
+        await asyncio.shield(
+            self._spawn_detached(
+                self._apply_remote_admin(enabled), "REXLiTE remote access mode"
+            )
+        )
+
+    async def _apply_remote_admin(self, enabled: bool) -> None:
         async with self._access_mode_lock:
             if self._config.remote_admin_enabled == enabled:
                 return
@@ -217,7 +259,7 @@ class REXLiTETunnelClient:
             # Reusing that socket after disabling remote access can leave gateway
             # streams tied to the previous mode/session. Fully restart the tunnel
             # so both disable and re-enable begin with no stale requests or streams.
-            await self.async_stop()
+            await self._async_stop_session()
             await self.async_start()
 
     async def _run_forever(self) -> None:
@@ -445,6 +487,9 @@ class REXLiTETunnelClient:
                     envelope.request_id, 403, _REMOTE_ADMIN_DISABLED
                 )
                 return
+            if self._is_self_reload(envelope):
+                await self._answer_self_reload(envelope.request_id, streamed=False)
+                return
             self._spawn_handler(self._handle_proxy_request(envelope))
             return
         if envelope.message_type == TYPE_STREAM_OPEN:
@@ -454,6 +499,9 @@ class REXLiTETunnelClient:
                     envelope.request_id,
                     {"status_code": 403, "error": _REMOTE_ADMIN_DISABLED},
                 )
+                return
+            if self._is_self_reload(envelope):
+                await self._answer_self_reload(envelope.request_id, streamed=True)
                 return
             self._spawn_handler(self._handle_stream_open(envelope))
             return
@@ -473,10 +521,68 @@ class REXLiTETunnelClient:
             "Ignoring unsupported gateway message type %s", envelope.message_type
         )
 
+    def _is_self_reload(self, envelope: Envelope) -> bool:
+        """Return whether a request asks Home Assistant to reload this tunnel."""
+
+        if (
+            not envelope.request_id
+            or not self._config.entry_id
+            or self._self_reload_callback is None
+        ):
+            return False
+        method = envelope.payload.get("method")
+        path = envelope.payload.get("path")
+        if not isinstance(method, str) or not isinstance(path, str):
+            return False
+        return method.upper() == "POST" and path.rstrip("/") == (
+            f"/api/config/config_entries/entry/{self._config.entry_id}/reload"
+        )
+
+    async def _answer_self_reload(self, request_id: str, *, streamed: bool) -> None:
+        """Acknowledge a reload of this entry, then reload outside the tunnel.
+
+        Reloading inside the forwarded request would close the session that
+        carries it; Home Assistant then cancels the reload halfway and the
+        entry stays unloaded with no tunnel left to repair it.
+        """
+
+        headers = {"Content-Type": ["application/json"]}
+        if streamed:
+            await self._send(
+                TYPE_STREAM_ACCEPT,
+                request_id,
+                {"status_code": 200, "headers": headers},
+            )
+            await self._send_stream_data(request_id, _SELF_RELOAD_RESPONSE)
+            await self._send(TYPE_STREAM_CLOSE, request_id, {})
+        else:
+            await self._send(
+                TYPE_PROXY_RESPONSE,
+                request_id,
+                {
+                    "status_code": 200,
+                    "headers": headers,
+                    "body": encode_bytes(_SELF_RELOAD_RESPONSE),
+                },
+            )
+        _LOGGER.info("REXLiTE AI reload requested through the cloud tunnel")
+        if self._self_reload_callback is not None:
+            try:
+                self._self_reload_callback()
+            except Exception:  # noqa: BLE001 - isolate lifecycle notifications
+                _LOGGER.exception("Unable to schedule the REXLiTE AI reload")
+
     def _spawn_handler(self, coroutine: Any) -> None:
         task = self._task_factory(coroutine, "REXLiTE tunnel request")
         self._handler_tasks.add(task)
         task.add_done_callback(self._handler_done)
+
+    def _spawn_detached(
+        self, coroutine: Coroutine[Any, Any, Any], name: str
+    ) -> asyncio.Task[Any]:
+        task = self._detached_task_factory(coroutine, name)
+        task.add_done_callback(_consume_detached_result)
+        return task
 
     def _handler_done(self, task: asyncio.Task[Any]) -> None:
         self._handler_tasks.discard(task)
@@ -501,26 +607,23 @@ class REXLiTETunnelClient:
                 url = local_request_url(
                     self._config.home_assistant_url, path, raw_query
                 )
-                timeout = aiohttp.ClientTimeout(total=self._config.request_timeout)
-                async with self._session.request(
-                    method,
-                    url,
-                    headers=headers,
-                    data=body,
-                    timeout=timeout,
-                    allow_redirects=False,
-                    auto_decompress=False,
-                ) as response:
-                    response_body = await self._read_response_body(response)
-                    await self._send(
-                        TYPE_PROXY_RESPONSE,
-                        envelope.request_id,
-                        {
-                            "status_code": response.status,
-                            "headers": self._response_headers(response.raw_headers),
-                            "body": encode_bytes(response_body),
-                        },
+                # Home Assistant cancels a request whose client disconnects, so
+                # the local exchange must not end with this tunnel session.
+                status, response_headers, response_body = await asyncio.shield(
+                    self._spawn_detached(
+                        self._local_exchange(method, url, headers, body),
+                        f"REXLiTE request {envelope.request_id}",
                     )
+                )
+                await self._send(
+                    TYPE_PROXY_RESPONSE,
+                    envelope.request_id,
+                    {
+                        "status_code": status,
+                        "headers": response_headers,
+                        "body": encode_bytes(response_body),
+                    },
+                )
             except asyncio.CancelledError:
                 raise
             except ProtocolError as err:
@@ -534,6 +637,30 @@ class REXLiTETunnelClient:
                 await self._send_proxy_error(
                     envelope.request_id, 502, self._safe_error(err)
                 )
+
+    async def _local_exchange(
+        self,
+        method: str,
+        url: str,
+        headers: list[tuple[str, str]],
+        body: bytes,
+    ) -> tuple[int, dict[str, list[str]], bytes]:
+        timeout = aiohttp.ClientTimeout(total=self._config.request_timeout)
+        async with self._session.request(
+            method,
+            url,
+            headers=headers,
+            data=body,
+            timeout=timeout,
+            allow_redirects=False,
+            auto_decompress=False,
+        ) as response:
+            response_body = await self._read_response_body(response)
+            return (
+                response.status,
+                self._response_headers(response.raw_headers),
+                response_body,
+            )
 
     async def _read_response_body(self, response: aiohttp.ClientResponse) -> bytes:
         body = bytearray()
@@ -556,6 +683,7 @@ class REXLiTETunnelClient:
                 {"status_code": 429, "error": "too many active streams"},
             )
             return
+        awaiting_response = False
         try:
             method = self._request_method(envelope.payload)
             path = self._required_string(envelope.payload, "path")
@@ -573,10 +701,12 @@ class REXLiTETunnelClient:
 
             request = self._raw_http_request(method, url, headers, body)
             writer.write(request)
+            awaiting_response = True
             await asyncio.wait_for(writer.drain(), timeout=self._config.request_timeout)
             response_head = await asyncio.wait_for(
                 reader.readuntil(b"\r\n\r\n"), timeout=self._config.request_timeout
             )
+            awaiting_response = False
             if len(response_head) > _MAX_HEADER_BYTES:
                 raise ProtocolError("Home Assistant response headers are too large")
             status, response_headers, body_plan = self._parse_http_response_head(
@@ -592,7 +722,12 @@ class REXLiTETunnelClient:
                 f"REXLiTE stream {envelope.request_id}",
             )
         except asyncio.CancelledError:
-            await self._close_stream(envelope.request_id)
+            # Only teardown cancels this handler; a caller that gives up sends
+            # stream_close instead, which still aborts the request.
+            if awaiting_response:
+                self._detach_stream(envelope.request_id)
+            else:
+                await self._close_stream(envelope.request_id)
             raise
         except (
             ProtocolError,
@@ -879,6 +1014,42 @@ class REXLiTETunnelClient:
                 stream.writer.wait_closed(),
                 timeout=min(5.0, self._config.request_timeout),
             )
+
+    def _detach_stream(self, request_id: str) -> None:
+        """Let Home Assistant finish a request whose tunnel session ended.
+
+        Home Assistant cancels a handler when its client disconnects, so closing
+        the socket now would abort the operation (such as a config entry
+        reload) halfway. Keep it open until the response starts, then drop it.
+        """
+
+        stream = self._streams.pop(request_id, None)
+        if stream is not None:
+            self._spawn_detached(
+                self._drain_detached_stream(stream),
+                f"REXLiTE detached request {request_id}",
+            )
+
+    async def _drain_detached_stream(self, stream: _LocalStream) -> None:
+        try:
+            await asyncio.wait_for(
+                stream.reader.readuntil(b"\r\n\r\n"),
+                timeout=self._config.request_timeout,
+            )
+        except (
+            OSError,
+            TimeoutError,
+            asyncio.IncompleteReadError,
+            asyncio.LimitOverrunError,
+        ):
+            pass
+        finally:
+            stream.writer.close()
+            with suppress(ConnectionError, OSError, TimeoutError):
+                await asyncio.wait_for(
+                    stream.writer.wait_closed(),
+                    timeout=min(5.0, self._config.request_timeout),
+                )
 
     async def _close_all_streams(self) -> None:
         readers = [

@@ -234,5 +234,154 @@ class CloudSocketTests(unittest.IsolatedAsyncioTestCase):
             )
 
 
+class TunnelCarriedLifecycleTests(unittest.IsolatedAsyncioTestCase):
+    """A reload or access change carried by the tunnel must finish and reconnect.
+
+    Home Assistant cancels a request handler when its client disconnects
+    (handler_cancellation), so closing the session under such a request used to
+    strand the entry halfway through unloading with no tunnel left.
+    """
+
+    RELOAD_PATH = "/api/config/config_entries/entry/entry-1/reload"
+
+    async def asyncSetUp(self) -> None:
+        self.gateways = []
+        self.received = []
+        self.changed = asyncio.Event()
+        self.phase = "loaded"
+        self.clients = []
+        self.reloads = []
+        self.runners = []
+        self.session = aiohttp.ClientSession()
+        gateway = web.Application()
+        gateway.router.add_get("/ws/agent", self._gateway)
+        home_assistant = web.Application()
+        home_assistant.router.add_post(self.RELOAD_PATH, self._reload_view)
+        home_assistant.router.add_post(
+            "/api/services/homeassistant/reload_config_entry", self._reload_view
+        )
+        home_assistant.router.add_post(
+            "/api/services/switch/turn_off", self._switch_off_view
+        )
+        self.gateway_port = await self._serve(gateway)
+        self.home_assistant_port = await self._serve(
+            home_assistant, handler_cancellation=True
+        )
+        self.clients.append(self._client())
+        await self.clients[-1].async_start()
+        await self._wait(lambda: self.clients[-1].state.connected and self.received)
+
+    async def asyncTearDown(self) -> None:
+        for client in self.clients:
+            await asyncio.wait_for(client.async_stop(), 2)
+        await asyncio.gather(*self.reloads, return_exceptions=True)
+        for ws in self.gateways:
+            await ws.close()
+        await self.session.close()
+        for runner in self.runners:
+            await runner.cleanup()
+
+    async def _serve(self, app, **kwargs):
+        runner = web.AppRunner(app, **kwargs)
+        await runner.setup()
+        self.runners.append(runner)
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        return site._server.sockets[0].getsockname()[1]
+
+    def _client(self):
+        return runtime.REXLiTETunnelClient(
+            self.session,
+            runtime.TunnelConfig(
+                agent_id="synthetic-cloud-test",
+                auth_token="synthetic-token",
+                gateway_url=f"ws://127.0.0.1:{self.gateway_port}/ws/agent",
+                home_assistant_url=f"http://127.0.0.1:{self.home_assistant_port}",
+                home_assistant_version="2026.8.0",
+                remote_admin_enabled=True,
+                entry_id="entry-1",
+                reconnect_delay=0.01,
+                reconnect_max_delay=0.03,
+                request_timeout=2,
+            ),
+            lambda state: self.changed.set(),
+            lambda coroutine, name: asyncio.create_task(coroutine, name=name),
+            ipc_ip_detector=lambda _url: None,
+            self_reload_callback=self._schedule_reload,
+        )
+
+    async def _gateway(self, request):
+        ws = web.WebSocketResponse()
+        await ws.prepare(request)
+        self.gateways.append(ws)
+        self.changed.set()
+        async for message in ws:
+            if message.type == aiohttp.WSMsgType.TEXT:
+                self.received.append(json.loads(message.data))
+                self.changed.set()
+        return ws
+
+    def _schedule_reload(self):
+        self.reloads.append(asyncio.create_task(self._reload()))
+
+    async def _reload(self):
+        # What Home Assistant does when it reloads the REXLiTE entry.
+        self.phase = "unloading"
+        await self.clients[-1].async_stop()
+        self.clients.append(self._client())
+        await self.clients[-1].async_start()
+        self.phase = "loaded"
+        self.changed.set()
+
+    async def _reload_view(self, request):
+        await self._reload()
+        return web.json_response({"require_restart": False})
+
+    async def _switch_off_view(self, request):
+        self.phase = "restarting"
+        await self.clients[-1].async_set_remote_admin(False)
+        self.phase = "loaded"
+        self.changed.set()
+        return web.json_response([])
+
+    async def _wait(self, predicate):
+        async with asyncio.timeout(5):
+            while not predicate():
+                self.changed.clear()
+                await self.changed.wait()
+
+    async def _forward(self, path):
+        sessions = len(self.gateways)
+        await self.gateways[-1].send_str(
+            protocol.make_envelope(
+                "stream_open", "req-1", {"method": "POST", "path": path}
+            )
+        )
+        await self._wait(
+            lambda: (
+                self.phase == "loaded"
+                and len(self.gateways) > sessions
+                and self.clients[-1].state.connected
+            )
+        )
+
+    async def test_entry_reload_replies_then_reconnects(self):
+        await self._forward(self.RELOAD_PATH)
+        replies = [m for m in self.received if m.get("request_id") == "req-1"]
+        self.assertEqual(
+            [m["type"] for m in replies],
+            ["stream_accept", "stream_data", "stream_close"],
+        )
+        self.assertEqual(replies[0]["payload"]["status_code"], 200)
+
+    async def test_service_reload_finishes_and_reconnects(self):
+        await self._forward("/api/services/homeassistant/reload_config_entry")
+        self.assertEqual(len(self.clients), 2)
+
+    async def test_remote_switch_off_keeps_a_health_session(self):
+        await self._forward("/api/services/switch/turn_off")
+        self.assertFalse(self.clients[-1].state.remote_admin_enabled)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -105,6 +105,7 @@ spec.loader.exec_module(integration)
 
 class _Entry:
     def __init__(self) -> None:
+        self.entry_id = "entry-1"
         self.data = {
             integration.CONF_AGENT_ID: "hub-1",
             integration.CONF_AGENT_AUTH_TOKEN: "secret-value",
@@ -188,6 +189,7 @@ class SetupTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(validations[0]["token"], "secret-value")
         coordinator = _Coordinator.instances[0]
         self.assertTrue(coordinator.started)
+        self.assertEqual(coordinator.config.entry_id, "entry-1")
         self.assertIs(entry.runtime_data, coordinator)
         self.assertEqual(entry.unload_callbacks, [coordinator.async_shutdown])
         self.assertEqual(hass.config_entries.forwarded[0][0], entry)

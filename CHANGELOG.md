@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.34
+
+- 修正經雲端重新載入 REXLiTE AI 會讓主機一直離線：HA 2026.8 的 HTTP 伺服器在用戶端斷線時會取消處理中的請求（`handler_cancellation`）。重新載入卸載 REXLiTE AI 時會關掉承載這個請求的 Tunnel，HA 就把重新載入取消在半途，設定項目停在 `unload_in_progress`（不可恢復），只能重新啟動 HA。2026-10-22 Nick 林口設備在 MAX’Is 整合商店按「重新載入」兩次，兩次都這樣斷線。
+- 經 Tunnel 收到重新載入本設定項目（`POST /api/config/config_entries/entry/<本項目>/reload`）時，先回 `{"require_restart": false}`，1 秒後由 HA 自己的工作重新載入；Tunnel 斷一下就重新連上。
+- Tunnel 結束時（重新載入、網路中斷、切換遠端控制），還在等 HA 回應的請求不再被關掉：連線保留到 HA 開始回應（最長 `request_timeout`），HA 不會把進行中的操作（例：`homeassistant.reload_config_entry`、刪除設定項目）取消在半途。呼叫端自己放棄（`stream_close`）仍照舊中止。
+- 從雲端關閉「Cloud service」開關：之前停掉 Tunnel 後，重新啟動那一步會跟著請求被取消，主機整台離線；現在重啟由自己的工作完成，主機維持只回報健康狀態的連線。
+- 設定項目卸載後，延遲中的重啟不會再把 Tunnel 帶起來。
+
 ## 0.1.33
 
 - KNX mapper（`MAPPER_REVISION` 12）：DPT 9.030（μg/m³，PM2.5／PM10）列為量測值，輸出 HA `sensor`（`type: "9.030"`）。之前只收到 9.029，GVS CSMS 多功能感測器（9 合 1）的 PM2.5、PM10 被當成 `insufficient_supported_entity_metadata` 跳過；CO2、TVOC、甲醛（9.008 ppm）本來就會出。REXLiTE KNX Contract 感測量測新增 CO2／PM2.5／PM10／TVOC／甲醛（ETS App 0.36.0）。
