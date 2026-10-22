@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import replace
 
@@ -13,6 +14,9 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from .runtime import REXLiTETunnelClient, RuntimeState, TunnelConfig
 
 _LOGGER = logging.getLogger(__name__)
+
+# Lets the reload acknowledgement leave before the reload closes the tunnel.
+_SELF_RELOAD_DELAY = 1.0
 
 
 class REXLiTECoordinator(DataUpdateCoordinator[RuntimeState]):
@@ -42,6 +46,10 @@ class REXLiTECoordinator(DataUpdateCoordinator[RuntimeState]):
                 hass, coroutine, name=name
             ),
             self._handle_auth_failure,
+            detached_task_factory=lambda coroutine, name: (
+                hass.async_create_background_task(coroutine, name)
+            ),
+            self_reload_callback=self._schedule_self_reload,
         )
         self.async_set_updated_data(self.client.state)
 
@@ -69,3 +77,16 @@ class REXLiTECoordinator(DataUpdateCoordinator[RuntimeState]):
         """Request one Home Assistant reauthentication flow."""
 
         self._entry.async_start_reauth(self.hass)
+
+    def _schedule_self_reload(self) -> None:
+        """Reload this entry once the tunnel has delivered its reply."""
+
+        self.hass.async_create_background_task(
+            self._async_self_reload(), f"REXLiTE reload {self._entry.entry_id}"
+        )
+
+    async def _async_self_reload(self) -> None:
+        await asyncio.sleep(_SELF_RELOAD_DELAY)
+        entry_id = self._entry.entry_id
+        if self.hass.config_entries.async_get_entry(entry_id) is not None:
+            self.hass.config_entries.async_schedule_reload(entry_id)
