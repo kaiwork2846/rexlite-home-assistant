@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.35
+
+- 新增 VIGI 攝影機一鍵開通（`rexlite/frigate/activate`，admin）：全新或重置的 TP-Link VIGI 攝影機在網頁設定 `admin` 密碼前拒絕所有登入，MAX’Is 加入攝影機精靈因此卡在登入（2026-10-23 Nick 林口設備的 VIGI-C540V）。中樞改用攝影機網頁相同的匿名 `set_password` 設定密碼（以網頁內建的 RSA 公鑰加密），再以 ONVIF 寫入中樞的時區與時間；安裝人員不必打開攝影機網頁填國家、時區、安全問題。
+- `rexlite/frigate/discover` 對還沒加入的 TP-Link 攝影機標出 `uninitialized`；`rexlite/frigate/probe` 遇到未開通的 VIGI 改回 `camera_uninitialized`（原本是 `camera_auth_failed`）。攝影機 HTTPS 偶爾斷線，查詢失敗會重試一次。
+- 密碼先依攝影機自己的規則檢查（9–32 個字元，含大寫、小寫、數字、符號，不可有 `aaa`／`abc`／`123`，不可含 `admin`），不符時回 `camera_weak_password`，不會送到攝影機。
+- 以 VIGI C540V（韌體 2.2.0）實測：開通、時區、ONVIF 與 RTSP 主／子串流皆正常。
+
 ## 0.1.34
 
 - 修正經雲端重新載入 REXLiTE AI 會讓主機一直離線：HA 2026.8 的 HTTP 伺服器在用戶端斷線時會取消處理中的請求（`handler_cancellation`）。重新載入卸載 REXLiTE AI 時會關掉承載這個請求的 Tunnel，HA 就把重新載入取消在半途，設定項目停在 `unload_in_progress`（不可恢復），只能重新啟動 HA。2026-10-22 Nick 林口設備在 MAX’Is 整合商店按「重新載入」兩次，兩次都這樣斷線。
