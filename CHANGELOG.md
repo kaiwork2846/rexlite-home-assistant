@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.36
+
+- 新增 `rexlite/thread/border_routers`（admin）：列出主機區網上的 Thread 邊界路由器（HA zeroconf 已在監聽 `_meshcop._udp`，直接讀快取；快取是空的才另外監聽 4 秒），回傳廠牌、型號、Thread 網路名稱、border agent id，以及是否已設定為 Open Thread Border Router 整合。
+- 每台路由器只探測私有 IPv4（沒有才用 ULA IPv6）的 OpenThread REST `:8081/node/ba-id`，回傳 `rest`（`ok`／`closed`／`unreachable`）與可直接加入 OTBR 整合的 `restUrl`。GL.iNet GL-S20 等 OpenThread 路由器需先在路由器開放 8081 埠；Apple TV、Google 等不提供 REST，會是 `closed`。
+- 搭配 HA MCP `POST /ha/hubs/:hubId/thread/prepare`（自動加入 Thread 與 OTBR 整合，MAX’Is Matter 加入精靈使用）；舊版主機回 `unknown_command`，精靈顯示「Thread：請更新 REXLiTE AI」。
+- `manifest.json` 的 `after_dependencies` 加入 `thread`（只讀它的探索工具；沒有設定 Thread 整合時不會先載入）。
+
 ## 0.1.35
 
 - 新增 VIGI 攝影機一鍵開通（`rexlite/frigate/activate`，admin）：全新或重置的 TP-Link VIGI 攝影機在網頁設定 `admin` 密碼前拒絕所有登入，MAX’Is 加入攝影機精靈因此卡在登入（2026-10-23 Nick 林口設備的 VIGI-C540V）。中樞改用攝影機網頁相同的匿名 `set_password` 設定密碼（以網頁內建的 RSA 公鑰加密），再以 ONVIF 寫入中樞的時區與時間；安裝人員不必打開攝影機網頁填國家、時區、安全問題。

@@ -6,6 +6,7 @@
     "mqtt",
     "network",
     "ssdp",
+    "thread",
     "zeroconf"
   ],
   "codeowners": [
@@ -22,5 +23,5 @@
   "issue_tracker": "https://github.com/rexliteai/rexlite-home-assistant/issues",
   "requirements": [],
   "single_config_entry": true,
-  "version": "0.1.35"
+  "version": "0.1.36"
 }
