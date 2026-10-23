@@ -16,7 +16,7 @@ PACKAGE = Path(__file__).parents[1] / "custom_components/rexlite"
 package = types.ModuleType("rexlite_frigate_bridge_tests")
 package.__path__ = [str(PACKAGE)]
 sys.modules[package.__name__] = package
-for name in ("camera_probe", "frigate_bridge"):
+for name in ("camera_probe", "vigi_setup", "frigate_bridge"):
     spec = importlib.util.spec_from_file_location(
         f"{package.__name__}.{name}", PACKAGE / f"{name}.py"
     )
@@ -749,6 +749,24 @@ class ProbeTests(unittest.IsolatedAsyncioTestCase):
                 {"host": "192.168.1.72", "username": "admin", "password": "x"}
             )
         self.assertEqual(caught.exception.code, "camera_auth_failed")
+
+    async def test_a_fresh_vigi_is_reported_as_uninitialized(self):
+        async def onvif_streams(*args):
+            raise probe.CameraError("camera_auth_failed", "攝影機帳號或密碼錯誤")
+
+        async def vigi_state(session, host, seconds=3):
+            return "uninitialized"
+
+        original = m.vigi_state
+        m.onvif_streams, m.vigi_state = onvif_streams, vigi_state
+        try:
+            with self.assertRaises(m.FrigateError) as caught:
+                await bridge(Frigate()).probe(
+                    {"host": "192.168.68.66", "username": "admin", "password": "x"}
+                )
+        finally:
+            m.vigi_state = original
+        self.assertEqual(caught.exception.code, "camera_uninitialized")
 
     async def test_manual_url_credentials_are_used_and_dropped(self):
         seen: list[tuple[str, str, str]] = []

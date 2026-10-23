@@ -13,8 +13,9 @@
 | type | 參數 | 回傳 |
 | --- | --- | --- |
 | `rexlite/frigate/status` | – | `frigate`（reachable、version、uptime、restream）、`cameras`（camera、label、host、enabled、record、detect、ptz、fps、online、managed、placeholder）、`job` |
-| `rexlite/frigate/discover` | `seconds`（1–8，預設 3） | `cameras`（host、port、name、hardware、vendor、configured）。在每個區網介面送 ONVIF WS-Discovery；只收宣告 `NetworkVideoTransmitter` 或 ONVIF scope 的回應（排除 Windows／NAS 的 WSD :5357） |
+| `rexlite/frigate/discover` | `seconds`（1–8，預設 3） | `cameras`（host、port、name、hardware、vendor、configured、uninitialized）。在每個區網介面送 ONVIF WS-Discovery；只收宣告 `NetworkVideoTransmitter` 或 ONVIF scope 的回應（排除 Windows／NAS 的 WSD :5357） |
 | `rexlite/frigate/probe` | `host`、`port`、`username`、`password`、`rtspUrl`、`hint` | `device`、`vendor`、`onvif`、`streams`（uri、codec、width、height、ok、error）、`main`、`sub`、`existing`、`suggestedName`、`hints` |
+| `rexlite/frigate/activate` | `host`、`port`（ONVIF，預設 80）、`password`（9–32 字元） | `host`、`username`（`admin`）、`activated`、`clock` |
 | `rexlite/frigate/add` | `operationId`（UUID v4）、`name`、`host`、`main`、`sub`、帳密、`mainWidth/Height`、`subWidth/Height`、`record`、`detect`、`ptz`、`onvifPort` | 背景工作 |
 | `rexlite/frigate/job` | `jobId` | 背景工作 |
 | `rexlite/frigate/remove` | `operationId`、`camera` | 背景工作 |
@@ -27,6 +28,16 @@
 3. ONVIF 不可用時，依廠牌試常見路徑（TP-Link `/stream1`、`/stream2` 優先，再試 Hikvision、Dahua、Reolink）。
 4. ONVIF 沒提供解析度時，請 Frigate 的 `/api/ffprobe` 補上。
 5. 錄影選最大的 H.264／H.265 串流，偵測選寬度 ≥ 640 的最小串流。
+
+### activate（VIGI 開通）
+
+全新或重置的 TP-Link VIGI 攝影機會回應 ONVIF 搜尋，但在網頁設定 `admin` 密碼前拒絕所有登入。中樞代替攝影機網頁送出同樣的匿名請求，安裝人員不必開攝影機網頁：
+
+1. 偵測：`POST https://IP/` `{"method":"do","user_management":{"get_encrypt_info":null}}`，`data.code` 為 `-40405` 即未開通。`discover` 只對未加入的 TP-Link 攝影機查詢並標 `uninitialized`；`probe` 帳密錯誤時也會查，未開通回 `camera_uninitialized`。攝影機 HTTPS 偶爾斷線，查詢失敗會重試一次。
+2. 開通：`{"method":"do","set_password":{…}}`，`username` 為 `admin`，`ciphertext` 是以攝影機網頁內建 RSA 公鑰（PKCS#1 v1.5）加密後 base64、URL 編碼的密碼；預設三個安全問題、答案留空，語言設繁體中文（攝影機支援時）。
+3. 時鐘：以 ONVIF `SetSystemDateAndTime` 寫入中樞時間與時區（`Asia/Taipei` → `UTC-8`），取代攝影機網頁的國家／時區欄位。
+
+密碼規則與攝影機相同：9–32 個可列印字元，含大寫、小寫、數字、符號，不可有 3 個相同或連續字元（`aaa`、`abc`、`123`），不可含 `admin`；不符時不送出（`camera_weak_password`）。密碼只用於這次請求。2026-10-23 以 VIGI C540V（韌體 2.2.0）實測：開通、時區、ONVIF 與 RTSP 主／子串流皆正常。
 
 ### add
 
@@ -47,4 +58,4 @@ Frigate 0.16–0.17（含 0.17.1）的即時新增／移除不可靠，已以 Fr
 
 ## 錯誤碼
 
-`message` 為可直接顯示的繁體中文。`camera_*`：`camera_invalid_request`、`camera_unreachable`、`camera_auth_failed`、`camera_onvif_failed`、`camera_stream_not_found`、`camera_rtsp_failed`、`camera_discovery_failed`。`frigate_*`：`frigate_unreachable`、`frigate_unsupported`、`frigate_busy`、`frigate_camera_exists`、`frigate_codec_unsupported`、`frigate_config_rejected`、`frigate_restream_failed`、`frigate_stream_not_running`、`frigate_camera_not_found`、`frigate_job_not_found`、`frigate_snapshot_failed`、`frigate_interrupted`、`frigate_failed`。
+`message` 為可直接顯示的繁體中文。`camera_*`：`camera_invalid_request`、`camera_unreachable`、`camera_auth_failed`、`camera_uninitialized`、`camera_weak_password`、`camera_not_vigi`、`camera_already_active`、`camera_activate_failed`、`camera_onvif_failed`、`camera_stream_not_found`、`camera_rtsp_failed`、`camera_discovery_failed`。`frigate_*`：`frigate_unreachable`、`frigate_unsupported`、`frigate_busy`、`frigate_camera_exists`、`frigate_codec_unsupported`、`frigate_config_rejected`、`frigate_restream_failed`、`frigate_stream_not_running`、`frigate_camera_not_found`、`frigate_job_not_found`、`frigate_snapshot_failed`、`frigate_interrupted`、`frigate_failed`。

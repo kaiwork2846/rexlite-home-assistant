@@ -56,6 +56,7 @@ from .camera_probe import (
     with_credentials,
     with_raw_credentials,
 )
+from .vigi_setup import vigi_activate, vigi_state
 
 DATA_KEY = "rexlite_frigate"
 STORE_KEY = "rexlite.frigate"
@@ -461,6 +462,7 @@ class FrigateBridge:
         create_task: Callable,
         interfaces: Callable[[], Any] | None = None,
         integration_version: str = "",
+        time_zone: Callable[[], str | None] | None = None,
         candidates: Iterable[str] = FRIGATE_CANDIDATES,
         go2rtc_url: str = GO2RTC_URL,
         sleep: Callable[[float], Any] = asyncio.sleep,
@@ -473,6 +475,7 @@ class FrigateBridge:
         self.create_task = create_task
         self.interfaces = interfaces
         self.integration_version = integration_version
+        self.time_zone = time_zone or (lambda: None)
         self.candidates = tuple(candidates)
         self.go2rtc = Go2rtcApi(session, go2rtc_url)
         self.sleep = sleep
@@ -617,6 +620,17 @@ class FrigateBridge:
         configured = await self._configured_hosts()
         for camera in cameras:
             camera["configured"] = configured.get(camera["host"])
+        # A factory-fresh VIGI answers discovery but no login until activated.
+        fresh = [
+            c for c in cameras if c.get("vendor") == TPLINK and not c["configured"]
+        ]
+        states = await asyncio.gather(
+            *(vigi_state(self.session, c["host"], 2) for c in fresh)
+        )
+        for camera in cameras:
+            camera["uninitialized"] = False
+        for camera, state in zip(fresh, states, strict=True):
+            camera["uninitialized"] = state == "uninitialized"
         return {
             "cameras": cameras,
             "durationMs": int((time.monotonic() - started) * 1000),
@@ -695,6 +709,7 @@ class FrigateBridge:
                     )
                 except CameraError as err:
                     if err.code == "camera_auth_failed":
+                        await self._raise_if_uninitialized(host)
                         raise
                     onvif["error"] = {"code": err.code, "message": err.message}
                 else:
@@ -731,6 +746,24 @@ class FrigateBridge:
             "suggestedName": (device.get("model") or msg.get("hint") or "")[:60],
             "hints": _hints(vendor, onvif, streams),
         }
+
+    async def _raise_if_uninitialized(self, host: str) -> None:
+        if await vigi_state(self.session, host, 3) == "uninitialized":
+            raise CameraError("camera_uninitialized", "攝影機尚未開通，可一鍵開通")
+
+    async def activate(self, msg: dict) -> dict:
+        """Activate a factory-fresh VIGI camera with the installer's password."""
+
+        try:
+            return await vigi_activate(
+                self.session,
+                msg.get("host"),
+                str(msg.get("password") or ""),
+                onvif_port=camera_port(msg.get("port"), 80),
+                time_zone=self.time_zone(),
+            )
+        except CameraError as err:
+            raise FrigateError(err.code, err.message) from None
 
     async def _check(
         self, candidates: list[dict], username: str, password: str
@@ -1285,6 +1318,7 @@ def register_frigate_bridge(hass: Any) -> FrigateBridge:
         create_task=lambda coro, name: hass.async_create_background_task(coro, name),
         interfaces=interfaces,
         integration_version=INTEGRATION_VERSION,
+        time_zone=lambda: hass.config.time_zone,
     )
 
     def handler(name: str, schema: dict, run: Callable):
@@ -1336,6 +1370,15 @@ def register_frigate_bridge(hass: Any) -> FrigateBridge:
                 vol.Optional("hint", default=""): vol.All(str, vol.Length(max=120)),
             },
             bridge.probe,
+        ),
+        handler(
+            "activate",
+            {
+                vol.Required("host"): host,
+                vol.Optional("port"): port,
+                vol.Required("password"): vol.All(str, vol.Length(min=9, max=32)),
+            },
+            bridge.activate,
         ),
         handler(
             "add",
