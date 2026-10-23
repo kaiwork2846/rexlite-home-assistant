@@ -92,15 +92,21 @@ class Camera:
                 raise OSError("connection reset")
             if not self.vigi:
                 return Response(200, b"<html></html>")
-            return Response(200, json.dumps(self.web(json.loads(kwargs["data"]))).encode())
+            return Response(
+                200, json.dumps(self.web(json.loads(kwargs["data"]))).encode()
+            )
         body = kwargs["data"].decode()
         if "GetSystemDateAndTime" in body:
-            return Response(200, SOAP.format("<GetSystemDateAndTimeResponse/>").encode())
+            return Response(
+                200, SOAP.format("<GetSystemDateAndTimeResponse/>").encode()
+            )
         if "SetSystemDateAndTime" in body:
             if not self.password or "UsernameToken" not in body:
                 return Response(401, b"")
             self.clock = body
-            return Response(200, SOAP.format("<SetSystemDateAndTimeResponse/>").encode())
+            return Response(
+                200, SOAP.format("<SetSystemDateAndTimeResponse/>").encode()
+            )
         return Response(404, b"")
 
     request = request_
@@ -111,7 +117,10 @@ class Camera:
                 return {"data": {"code": -40401, "nonce": "x"}, "error_code": -40401}
             return {"data": {"code": -40405}, "error_code": -40401}
         if "get_language_capability" in body:
-            return {"language_capability": ["English", "Traditional%20Chinese"], "error_code": 0}
+            return {
+                "language_capability": ["English", "Traditional%20Chinese"],
+                "error_code": 0,
+            }
         if "set_password" in body:
             self.received = body["set_password"]
             self.password = decrypt(self.received["ciphertext"])
@@ -165,7 +174,14 @@ class VigiSetupTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_weak_passwords_never_reach_the_camera(self):
         camera = Camera()
-        for weak in ("Aa123456789", "short1!A", "Xabc!9y8z7Q", "Xaaa!9y8z7Q", "Q!x9y789zW", "admin!X9y8z"):
+        for weak in (
+            "Aa123456789",
+            "short1!A",
+            "Xabc!9y8z7Q",
+            "Xaaa!9y8z7Q",
+            "Q!x9y789zW",
+            "admin!X9y8z",
+        ):
             with self.subTest(weak), self.assertRaises(m.CameraError) as caught:
                 await m.vigi_activate(camera, HOST, weak)
             self.assertEqual(caught.exception.code, "camera_weak_password")
