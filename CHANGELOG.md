@@ -5,6 +5,7 @@
 - 新增 `rexlite/thread/border_routers`（admin）：列出主機區網上的 Thread 邊界路由器（HA zeroconf 已在監聽 `_meshcop._udp`，直接讀快取；快取是空的才另外監聽 4 秒），回傳廠牌、型號、Thread 網路名稱、border agent id，以及是否已設定為 Open Thread Border Router 整合。
 - 每台路由器只探測私有 IPv4（沒有才用 ULA IPv6）的 OpenThread REST `:8081/node/ba-id`，回傳 `rest`（`ok`／`closed`／`unreachable`）與可直接加入 OTBR 整合的 `restUrl`。GL.iNet GL-S20 等 OpenThread 路由器需先在路由器開放 8081 埠；Apple TV、Google 等不提供 REST，會是 `closed`。
 - 搭配 HA MCP `POST /ha/hubs/:hubId/thread/prepare`（自動加入 Thread 與 OTBR 整合，MAX’Is Matter 加入精靈使用）；舊版主機回 `unknown_command`，精靈顯示「Thread：請更新 REXLiTE AI」。
+- `manifest.json` 的 `after_dependencies` 加入 `thread`（只讀它的探索工具；沒有設定 Thread 整合時不會先載入）。
 
 ## 0.1.35
 
