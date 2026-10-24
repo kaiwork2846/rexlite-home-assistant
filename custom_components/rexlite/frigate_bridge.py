@@ -23,6 +23,14 @@ cached segment of a camera that is no longer configured makes the recording
 maintainer fail every cycle (``frigate/record/maintainer.py``), for every
 other camera too.
 
+A camera's detect stream is decoded in software (``hwaccel_args: []``).
+Frigate's ``auto`` picks VAAPI on Intel hubs, and on 2026-10-23 VAAPI failed
+on a VIGI C540V sub stream every 30–40 s (``Failed to sync surface``); after
+about 300 ffmpeg restarts Frigate ran out of file descriptors, its watchdog
+thread died and the camera stayed without frames until Frigate restarted. A
+small detect stream at 5 fps costs little CPU. ``[]`` and not ``""``: an
+empty string makes ``/api/config/set`` delete the key, back to ``auto``.
+
 Camera credentials are written into the Frigate configuration on this hub
 (that is where Frigate needs them) and nowhere else: not into HA storage, job
 records, results or error messages.
@@ -409,7 +417,8 @@ def camera_config(
     config: dict[str, Any] = {
         "enabled": True,
         "friendly_name": label,
-        "ffmpeg": {"inputs": inputs},
+        # Software decode for detect: see the module docstring.
+        "ffmpeg": {"inputs": inputs, "hwaccel_args": []},
         "detect": {"enabled": detect, "fps": 5},
         "record": {"enabled": record},
     }
