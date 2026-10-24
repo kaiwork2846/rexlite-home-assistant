@@ -23,5 +23,5 @@
   "issue_tracker": "https://github.com/rexliteai/rexlite-home-assistant/issues",
   "requirements": [],
   "single_config_entry": true,
-  "version": "0.1.36"
+  "version": "0.1.37"
 }

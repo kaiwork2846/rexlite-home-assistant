@@ -462,7 +462,9 @@ class AddTests(unittest.IsolatedAsyncioTestCase):
                             "input_args": "preset-rtsp-restream",
                             "roles": ["detect"],
                         },
-                    ]
+                    ],
+                    # Software decode: VAAPI crash-looped Frigate on a VIGI C540V.
+                    "hwaccel_args": [],
                 },
                 "detect": {"enabled": True, "fps": 5, "width": 640, "height": 360},
                 "record": {"enabled": True},
@@ -516,6 +518,7 @@ class AddTests(unittest.IsolatedAsyncioTestCase):
                 },
             ],
         )
+        self.assertEqual(block["ffmpeg"]["hwaccel_args"], [])
         self.assertNotIn("go2rtc", frigate.config_sets[-1]["config_data"])
         self.assertNotIn("live", block)
 

@@ -44,6 +44,7 @@
 `streams`（DESCRIBE）→ `configure`（go2rtc restream、`PUT /api/config/set`）→ `restart`（`POST /api/restart`）→ `verify`（`camera_fps > 0`）。失敗時 `rollback`。同一 `operationId` 重送回傳同一工作；同時只執行一個（`frigate_busy`）。HA 重新啟動時執行中的工作標為 `interrupted`。
 
 - Frigate 範例攝影機 `name_of_your_camera`（路徑 `rtsp://10.0.10.10:554/rtsp`）會一併移除。
+- 偵測串流一律以軟體解碼（`ffmpeg.hwaccel_args: []`）。Frigate 預設 `auto` 在 Intel 主機會選 VAAPI；2026-10-23 Nick 林口設備的 VIGI C540V 子串流每 30–40 秒解碼失敗一次（`Failed to sync surface`），ffmpeg 重開約 300 次後 Frigate 檔案描述元用盡、看門狗執行緒停止，攝影機一直沒有畫面（平台顯示離線），重開攝影機也不會恢復。偵測串流小、5 fps，軟體解碼負擔很小。要寫 `[]` 而不是 `""`：空字串會讓 `/api/config/set` 刪掉這個鍵，又回到 `auto`。
 - go2rtc 串流網址的帳密以百分比編碼；Frigate 自己的 ffmpeg／ffprobe 路徑（無 go2rtc 時）用原始帳密，因為 Frigate 會再編碼一次。
 - 帳密只寫入主機上的 Frigate 設定；不寫入 HA 儲存、工作紀錄、結果或錯誤訊息。
 
