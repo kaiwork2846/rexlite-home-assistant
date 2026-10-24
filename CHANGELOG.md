@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.37
+
+- 修正加入的攝影機過一段時間後一直離線：Frigate 預設自動選擇硬體解碼，在 Intel 主機會用 VAAPI。2026-10-23 Nick 林口設備的 VIGI C540V 子串流每 30–40 秒解碼失敗一次（`Failed to sync surface`），ffmpeg 重開約 300 次後 Frigate 檔案描述元用盡、看門狗執行緒停止，攝影機一直沒有畫面（平台顯示離線），重開攝影機也不會恢復。
+- `rexlite/frigate/add` 寫入的攝影機改為偵測串流一律軟體解碼（`ffmpeg.hwaccel_args: []`）；偵測串流小、5 fps，負擔很小。已加入的攝影機不會自動修改。
+
 ## 0.1.36
 
 - 新增 `rexlite/thread/border_routers`（admin）：列出主機區網上的 Thread 邊界路由器（HA zeroconf 已在監聽 `_meshcop._udp`，直接讀快取；快取是空的才另外監聽 4 秒），回傳廠牌、型號、Thread 網路名稱、border agent id，以及是否已設定為 Open Thread Border Router 整合。
