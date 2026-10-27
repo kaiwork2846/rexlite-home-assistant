@@ -31,6 +31,11 @@ thread died and the camera stayed without frames until Frigate restarted. A
 small detect stream at 5 fps costs little CPU. ``[]`` and not ``""``: an
 empty string makes ``/api/config/set`` delete the key, back to ``auto``.
 
+Camera settings (recording, detection, retention, tracked objects) change
+live through Frigate's update topics, except switching recording on: Frigate
+only gives an ffmpeg process its recording output when recording was enabled
+at start (``frigate/config/camera/camera.py``), so that one restarts Frigate.
+
 Camera credentials are written into the Frigate configuration on this hub
 (that is where Frigate needs them) and nowhere else: not into HA storage, job
 records, results or error messages.
@@ -49,6 +54,14 @@ from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import quote, urlencode, urlsplit
 
+from .camera_control import (
+    DEFAULT_NTP,
+    DIRECTIONS,
+    IR_CUT_MODES,
+    CameraControl,
+    camera_access,
+    stream_sources,
+)
 from .camera_probe import (
     TPLINK,
     CameraError,
@@ -81,6 +94,9 @@ _UUID = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
 )
 _CAMERA = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+# Labels of Frigate's default COCO model an installer can choose to track.
+TRACKABLE_OBJECTS = ("person", "car", "motorcycle", "bicycle", "dog", "cat")
+MAX_RETAIN_DAYS = 365
 
 
 class FrigateError(Exception):
@@ -127,8 +143,11 @@ async def _send(
     seconds: float = 10,
     binary: bool = False,
     service: str = "Frigate",
+    headers: dict[str, str] | None = None,
 ) -> tuple[int, Any]:
     kwargs: dict[str, Any] = {"timeout": _timeout(seconds)}
+    if headers:
+        kwargs["headers"] = headers
     if json_body is not None:
         kwargs["json"] = json_body
     try:
@@ -155,9 +174,15 @@ class FrigateApi:
         self.session = session
         self.base_url = base_url
 
-    async def get(self, path: str, *, seconds: float = 10) -> Any:
+    async def get(
+        self, path: str, *, seconds: float = 10, headers: dict | None = None
+    ) -> Any:
         status, payload = await _send(
-            self.session, "GET", _url(self.base_url, "/api" + path), seconds=seconds
+            self.session,
+            "GET",
+            _url(self.base_url, "/api" + path),
+            seconds=seconds,
+            headers=headers,
         )
         if status != 200:
             raise FrigateError("frigate_failed", f"Frigate 回應錯誤（HTTP {status}）")
@@ -166,10 +191,24 @@ class FrigateApi:
     async def version(self) -> str:
         return str(await self.get("/version", seconds=4) or "").strip()[:40]
 
-    async def config(self) -> dict:
-        payload = await self.get("/config", seconds=15)
+    async def config(self, *, fresh: bool = False) -> dict:
+        # Frigate's nginx caches /api/config for 5 s; a read right after a
+        # write must skip that cache.
+        headers = {"X-Cache-Bypass": "1"} if fresh else None
+        payload = await self.get("/config", seconds=15, headers=headers)
         if not isinstance(payload, dict):
             raise FrigateError("frigate_failed", "Frigate 設定格式不正確")
+        return payload
+
+    async def raw_config(self) -> str:
+        """Frigate's configuration file as written, credentials included.
+
+        Only this hub reads it, for a camera's ONVIF access; it never leaves.
+        """
+
+        payload = await self.get("/config/raw", seconds=15)
+        if not isinstance(payload, str) or not payload.strip():
+            raise FrigateError("frigate_failed", "無法讀取 Frigate 設定")
         return payload
 
     async def stats(self) -> dict:
@@ -225,6 +264,7 @@ class FrigateApi:
             _url(self.base_url, f"/api/{camera}/latest.jpg", {"h": height}),
             seconds=15,
             binary=True,
+            headers={"X-Cache-Bypass": "1"},
         )
         if status != 200 or not isinstance(data, bytes | bytearray) or not data:
             raise FrigateError("frigate_snapshot_failed", "目前無法取得攝影機畫面")
@@ -289,6 +329,22 @@ class Go2rtcApi:
         )
         if name not in await self.streams():
             raise FrigateError("frigate_restream_failed", "go2rtc 無法建立串流")
+
+    async def webrtc(self, name: str, offer: str) -> str:
+        """go2rtc's SDP answer for a browser offer (non-trickle, candidates inline)."""
+
+        status, payload = await _send(
+            self.session,
+            "POST",
+            _url(self.base_url, "/api/webrtc", {"src": name}),
+            json_body={"type": "offer", "sdp": offer},
+            seconds=20,
+            service="go2rtc",
+        )
+        answer = payload.get("sdp") if isinstance(payload, dict) else None
+        if status != 200 or not isinstance(answer, str) or not answer.startswith("v=0"):
+            raise FrigateError("frigate_live_failed", "攝影機即時畫面連線失敗")
+        return answer
 
     async def remove(self, name: str) -> None:
         with contextlib.suppress(FrigateError):
@@ -497,6 +553,8 @@ class FrigateBridge:
         self.version = ""
         self.jobs: dict[str, dict] = {}
         self.active: asyncio.Task | None = None
+        # One ONVIF operation per camera at a time (a move ends with a stop).
+        self.camera_locks: dict[str, asyncio.Lock] = {}
 
     # Storage ---------------------------------------------------------------
 
@@ -598,12 +656,11 @@ class FrigateBridge:
             hosts = sorted(camera_hosts(name, camera, streams))
             listed.append(
                 {
+                    **camera_settings(camera),
                     "camera": name,
                     "label": str(camera.get("friendly_name") or name)[:120],
                     "host": hosts[0] if hosts else "",
                     "enabled": camera.get("enabled") is not False,
-                    "record": bool((camera.get("record") or {}).get("enabled")),
-                    "detect": bool((camera.get("detect") or {}).get("enabled")),
                     "ptz": bool((camera.get("onvif") or {}).get("host")),
                     "fps": round(fps, 1),
                     "detectFps": round(float(current.get("detection_fps") or 0), 1),
@@ -883,6 +940,19 @@ class FrigateBridge:
             msg["operationId"],
             {"camera": camera},
             lambda job: self._remove(job, camera),
+        )
+
+    async def start_configure(self, msg: dict) -> dict:
+        await self.load()
+        camera = str(msg.get("camera") or "")
+        if not _CAMERA.match(camera):
+            raise FrigateError("frigate_invalid_request", "攝影機名稱不正確")
+        changes = settings_request(msg)
+        return self._start(
+            "configure",
+            msg["operationId"],
+            {"camera": camera},
+            lambda job: self._configure(job, camera, changes),
         )
 
     def _add_request(self, msg: dict) -> dict:
@@ -1227,6 +1297,163 @@ class FrigateBridge:
         await self._save()
         return {"camera": camera, "removed": True, "restarted": restarted}
 
+    async def _configure(self, job: dict, camera: str, changes: dict) -> dict:
+        api = await self.api()
+        config = await api.config()
+        cameras = (
+            config.get("cameras") if isinstance(config.get("cameras"), dict) else {}
+        )
+        current = cameras.get(camera)
+        if not isinstance(current, dict):
+            raise FrigateError("frigate_camera_not_found", "Frigate 已沒有這台攝影機")
+        job["label"] = str(current.get("friendly_name") or camera)
+        sections = settings_patch(current, changes)
+        before = camera_settings(current)
+        # See the module docstring: recording only starts after a restart.
+        restart = changes.get("record") is True and not before["record"]
+        job.update(stage="configure", message="寫入 Frigate 設定")
+        fps = None
+        if restart:
+            await api.config_set({"cameras": {camera: sections}})
+            job.update(stage="restart", message="重新啟動 Frigate（約 1 分鐘）")
+            await api.restart()
+            await self._wait_back(api)
+            job.update(stage="verify", message="等待攝影機畫面")
+            fps = await self._wait_fps(api, camera)
+        else:
+            for section, value in sections.items():
+                await api.config_set(
+                    {"cameras": {camera: {section: value}}},
+                    f"config/cameras/{camera}/{section}",
+                )
+        after = (await api.config(fresh=True)).get("cameras", {}).get(camera)
+        return {
+            "camera": camera,
+            "restarted": restart,
+            "fps": fps,
+            "settings": camera_settings(after if isinstance(after, dict) else {}),
+        }
+
+    # Camera-side settings (ONVIF) --------------------------------------------
+
+    async def _control(self, camera: str) -> tuple[FrigateApi, CameraControl]:
+        if not _CAMERA.match(camera):
+            raise FrigateError("frigate_invalid_request", "攝影機名稱不正確")
+        api = await self.api()
+        access = camera_access(await api.raw_config(), camera)
+        control = CameraControl(self.session, access)
+        await control.connect()
+        return api, control
+
+    async def camera_info(self, msg: dict) -> dict:
+        camera = str(msg.get("camera") or "")
+        async with self.camera_locks.setdefault(camera, asyncio.Lock()):
+            _api, control = await self._control(camera)
+            return {"camera": camera, **await control.info()}
+
+    async def camera_control(self, msg: dict) -> dict:
+        camera, op = str(msg.get("camera") or ""), str(msg.get("op") or "")
+        async with self.camera_locks.setdefault(camera, asyncio.Lock()):
+            api, control = await self._control(camera)
+            result: dict[str, Any] = {"camera": camera, "op": op}
+            if op == "move":
+                await control.move(
+                    msg["direction"],
+                    float(msg.get("speed", 0.5)),
+                    float(msg.get("seconds", 0.5)),
+                )
+                if msg.get("snapshot", True):
+                    result["snapshot"] = await self._settled_frame(api, camera, 0.6)
+            elif op == "stop":
+                await control.stop()
+            elif op == "goto":
+                await control.goto(msg["token"])
+                # GotoPreset returns at once; the camera turns for a moment.
+                if msg.get("snapshot", True):
+                    result["snapshot"] = await self._settled_frame(api, camera, 2.5)
+            elif op == "save_preset":
+                name = re.sub(r"\s+", " ", str(msg.get("name") or "")).strip()
+                if not name or any(ord(c) < 32 for c in name):
+                    raise FrigateError("frigate_invalid_request", "請輸入預置點名稱")
+                result["token"] = await control.save_preset(name, msg.get("token"))
+                result["presets"] = await control.presets()
+            elif op == "remove_preset":
+                await control.remove_preset(msg["token"])
+                result["presets"] = await control.presets()
+            elif op == "image":
+                changes = dict(msg.get("image") or {})
+                if not changes:
+                    raise FrigateError("frigate_invalid_request", "沒有要變更的設定")
+                await control.set_image(changes)
+                result["image"] = await control.image()
+            elif op == "quality":
+                changes = dict(msg.get("quality") or {})
+                if not msg.get("profile") or not changes:
+                    raise FrigateError("frigate_invalid_request", "沒有要變更的設定")
+                await control.set_quality(str(msg["profile"]), changes)
+                result["quality"] = await control.quality()
+            elif op == "clock":
+                await control.set_clock(
+                    bool(msg.get("ntp")),
+                    str(msg.get("server") or DEFAULT_NTP),
+                    self.time_zone(),
+                )
+                await self.sleep(1)
+                result["clock"] = await control.clock()
+            else:
+                raise FrigateError("frigate_invalid_request", "不支援的攝影機操作")
+            return result
+
+    async def webrtc(self, msg: dict) -> dict:
+        """Answer a browser's WebRTC offer with the hub's go2rtc.
+
+        Only this exchange crosses the cloud; video and voice then flow
+        browser ↔ hub directly (or through TURN when no direct path exists).
+        Talking needs the camera's ONVIF audio backchannel, which the
+        Frigate restreams switch off (``#backchannel=0``), so it uses a
+        separate ``<camera>_talk`` restream that go2rtc opens on demand.
+        """
+
+        camera = str(msg.get("camera") or "")
+        if not _CAMERA.match(camera):
+            raise FrigateError("frigate_invalid_request", "攝影機名稱不正確")
+        offer = str(msg.get("offer") or "")
+        if not offer.startswith("v=0"):
+            raise FrigateError("frigate_invalid_request", "連線參數不正確")
+        quality = "main" if msg.get("quality") == "main" else "sub"
+        talk = bool(msg.get("talk"))
+        api = await self.api()
+        sources = stream_sources(await api.raw_config(), camera)
+        if not sources:
+            raise FrigateError(
+                "frigate_live_unavailable", "這台攝影機沒有可即時觀看的串流"
+            )
+        if quality not in sources:
+            quality = next(iter(sources))
+        name = camera if quality == "main" else f"{camera}_sub"
+        if talk:
+            name = f"{camera}_talk"
+            # Credentials stay on this hub: go2rtc gets them from here only.
+            await self.go2rtc.add(name, sources[quality])
+        answer = await self.go2rtc.webrtc(name, offer)
+        return {
+            "camera": camera,
+            "quality": quality,
+            "qualities": sorted(sources, key=("main", "sub").index),
+            "talk": talk and accepts_audio(answer),
+            "answer": answer,
+        }
+
+    async def _settled_frame(
+        self, api: FrigateApi, camera: str, seconds: float
+    ) -> str | None:
+        """A frame after the camera stopped moving; Frigate decodes at 5 fps."""
+
+        await self.sleep(seconds)
+        with contextlib.suppress(FrigateError):
+            return base64.b64encode(await api.latest_jpeg(camera, 360)).decode()
+        return None
+
     async def snapshot(self, msg: dict) -> dict:
         camera = str(msg.get("camera") or "")
         if not _CAMERA.match(camera):
@@ -1239,6 +1466,94 @@ class FrigateBridge:
             "data": base64.b64encode(image).decode(),
             "capturedAt": _now(),
         }
+
+
+def _days(value: Any) -> int | None:
+    days = value.get("days") if isinstance(value, dict) else None
+    return _int(days) if days is not None else None
+
+
+def camera_settings(camera: dict) -> dict:
+    """The settings an installer can change, as Frigate resolved them.
+
+    ``recordDays`` is continuous recording (``record.continuous`` from Frigate
+    0.16, ``record.retain`` before); ``eventDays`` keeps alerts and detections.
+    """
+
+    record = camera.get("record") if isinstance(camera.get("record"), dict) else {}
+    detect = camera.get("detect") if isinstance(camera.get("detect"), dict) else {}
+    objects = camera.get("objects") if isinstance(camera.get("objects"), dict) else {}
+    alerts = record.get("alerts") if isinstance(record.get("alerts"), dict) else {}
+    track = objects.get("track")
+    return {
+        "record": bool(record.get("enabled")),
+        "detect": bool(detect.get("enabled")),
+        "recordDays": _days(record.get("continuous", record.get("retain"))),
+        "eventDays": _days(alerts.get("retain")),
+        "objects": [str(o) for o in track] if isinstance(track, list) else None,
+    }
+
+
+def settings_request(msg: dict) -> dict:
+    """The settings a ``configure`` request changes; at least one."""
+
+    changes: dict[str, Any] = {}
+    for key in ("record", "detect"):
+        if isinstance(msg.get(key), bool):
+            changes[key] = msg[key]
+    for key in ("recordDays", "eventDays"):
+        if msg.get(key) is not None:
+            days = _int(msg[key])
+            if days is None or not 0 <= days <= MAX_RETAIN_DAYS:
+                raise FrigateError(
+                    "frigate_invalid_request", f"保存天數需為 0–{MAX_RETAIN_DAYS} 天"
+                )
+            changes[key] = days
+    if msg.get("objects") is not None:
+        objects = list(dict.fromkeys(str(o) for o in msg["objects"]))
+        if not objects or any(o not in TRACKABLE_OBJECTS for o in objects):
+            raise FrigateError("frigate_invalid_request", "請至少選擇一種偵測物件")
+        changes["objects"] = objects
+    if not changes:
+        raise FrigateError("frigate_invalid_request", "沒有要變更的設定")
+    return changes
+
+
+def settings_patch(camera: dict, changes: dict) -> dict:
+    """``cameras.<name>`` sections for ``/api/config/set``, keyed by update topic."""
+
+    record = camera.get("record") if isinstance(camera.get("record"), dict) else {}
+    sections: dict[str, dict] = {}
+    patch: dict[str, Any] = {}
+    if "record" in changes:
+        patch["enabled"] = changes["record"]
+    if "recordDays" in changes:
+        # Frigate 0.16 renamed record.retain to record.continuous.
+        legacy = "retain" in record and "continuous" not in record
+        key = "retain" if legacy else "continuous"
+        patch[key] = {"days": changes["recordDays"]}
+    if "eventDays" in changes:
+        for review in ("alerts", "detections"):
+            patch[review] = {"retain": {"days": changes["eventDays"]}}
+    if patch:
+        sections["record"] = patch
+    if "detect" in changes:
+        sections["detect"] = {"enabled": changes["detect"]}
+    if "objects" in changes:
+        sections["objects"] = {"track": changes["objects"]}
+    return sections
+
+
+def accepts_audio(answer: str) -> bool:
+    """Whether go2rtc will take the browser's microphone (a camera backchannel)."""
+
+    sections = answer.split("\nm=")
+    for section in sections[1:]:
+        if section.startswith("audio") and re.search(
+            r"^a=(recvonly|sendrecv)\r?$", section, re.MULTILINE
+        ):
+            return True
+    return False
 
 
 def pick_streams(streams: list[dict]) -> tuple[dict | None, dict | None]:
@@ -1357,6 +1672,7 @@ def register_frigate_bridge(hass: Any) -> FrigateBridge:
     uri = vol.All(str, vol.Length(min=8, max=1024))
     operation = vol.All(str, vol.Length(min=36, max=36))
     camera = vol.All(str, vol.Match(_CAMERA))
+    days = vol.All(vol.Coerce(int), vol.Range(min=0, max=MAX_RETAIN_DAYS))
     commands = (
         handler("status", {}, lambda msg: bridge.status()),
         handler(
@@ -1419,6 +1735,81 @@ def register_frigate_bridge(hass: Any) -> FrigateBridge:
             "remove",
             {vol.Required("operationId"): operation, vol.Required("camera"): camera},
             bridge.start_remove,
+        ),
+        handler(
+            "configure",
+            {
+                vol.Required("operationId"): operation,
+                vol.Required("camera"): camera,
+                vol.Optional("record"): bool,
+                vol.Optional("detect"): bool,
+                vol.Optional("recordDays"): days,
+                vol.Optional("eventDays"): days,
+                vol.Optional("objects"): vol.All(
+                    [vol.In(TRACKABLE_OBJECTS)],
+                    vol.Length(min=1, max=len(TRACKABLE_OBJECTS)),
+                ),
+            },
+            bridge.start_configure,
+        ),
+        handler("camera_info", {vol.Required("camera"): camera}, bridge.camera_info),
+        handler(
+            "webrtc",
+            {
+                vol.Required("camera"): camera,
+                vol.Required("offer"): vol.All(str, vol.Length(min=10, max=20000)),
+                vol.Optional("quality", default="sub"): vol.In(("main", "sub")),
+                vol.Optional("talk", default=False): bool,
+            },
+            bridge.webrtc,
+        ),
+        handler(
+            "camera_control",
+            {
+                vol.Required("camera"): camera,
+                vol.Required("op"): vol.In(
+                    (
+                        "move",
+                        "stop",
+                        "goto",
+                        "save_preset",
+                        "remove_preset",
+                        "image",
+                        "clock",
+                        "quality",
+                    )
+                ),
+                vol.Optional("direction"): vol.In(tuple(DIRECTIONS)),
+                vol.Optional("speed", default=0.5): vol.All(
+                    vol.Coerce(float), vol.Range(min=0.1, max=1)
+                ),
+                vol.Optional("seconds", default=0.5): vol.All(
+                    vol.Coerce(float), vol.Range(min=0.1, max=2)
+                ),
+                # A live view already shows the move: no frame through the cloud.
+                vol.Optional("snapshot", default=True): bool,
+                vol.Optional("token"): vol.All(str, vol.Length(min=1, max=64)),
+                vol.Optional("name"): vol.All(str, vol.Length(min=1, max=40)),
+                vol.Optional("image"): {
+                    vol.Optional(key): vol.All(
+                        vol.Coerce(float), vol.Range(min=-1000, max=1000)
+                    )
+                    for key in ("brightness", "saturation", "contrast", "sharpness")
+                }
+                | {vol.Optional("irCut"): vol.In(IR_CUT_MODES)},
+                vol.Optional("profile"): vol.All(str, vol.Length(min=1, max=64)),
+                vol.Optional("quality"): {
+                    vol.Optional(key): vol.All(
+                        vol.Coerce(int), vol.Range(min=1, max=100000)
+                    )
+                    for key in ("width", "height", "fps", "bitrate")
+                },
+                vol.Optional("ntp"): bool,
+                vol.Optional("server"): vol.All(
+                    str, vol.Length(min=1, max=253), vol.Match(r"^[A-Za-z0-9.-]+$")
+                ),
+            },
+            bridge.camera_control,
         ),
         handler(
             "snapshot",
