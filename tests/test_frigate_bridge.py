@@ -642,6 +642,134 @@ class RemoveTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(b.job(OPERATION)["error"]["code"], "frigate_camera_not_found")
 
 
+CAMERA = "m6d459e1198784b8fa0eec25491d50018"
+
+
+class ConfigureTests(unittest.IsolatedAsyncioTestCase):
+    async def configure(self, frigate: Frigate, **changes):
+        b = bridge(frigate)
+        await b.start_configure({"operationId": OPERATION, "camera": CAMERA, **changes})
+        await b.active
+        return b.job(OPERATION)
+
+    async def test_status_reports_settings(self):
+        frigate = Frigate()
+        frigate.config["cameras"][CAMERA]["record"].update(
+            continuous={"days": 3}, alerts={"retain": {"days": 10}}
+        )
+        frigate.config["cameras"][CAMERA]["objects"] = {"track": ["person"]}
+        camera = (await bridge(frigate).status())["cameras"][0]
+        self.assertEqual(
+            {k: camera[k] for k in ("record", "detect", "recordDays", "eventDays")},
+            {"record": True, "detect": True, "recordDays": 3, "eventDays": 10},
+        )
+        self.assertEqual(camera["objects"], ["person"])
+        # Frigate 0.15 and older keep continuous recording in record.retain.
+        self.assertEqual(
+            m.camera_settings({"record": {"retain": {"days": 7}}})["recordDays"], 7
+        )
+
+    async def test_live_changes_use_update_topics(self):
+        frigate = Frigate()
+        job = await self.configure(
+            frigate, detect=False, recordDays=7, eventDays=14, objects=["person", "car"]
+        )
+        self.assertEqual(job["state"], "completed", job["error"])
+        self.assertEqual(frigate.restarts, 0)
+        self.assertFalse(job["result"]["restarted"])
+        self.assertEqual(
+            {c["update_topic"]: c["config_data"] for c in frigate.config_sets},
+            {
+                f"config/cameras/{CAMERA}/record": {
+                    "cameras": {
+                        CAMERA: {
+                            "record": {
+                                "continuous": {"days": 7},
+                                "alerts": {"retain": {"days": 14}},
+                                "detections": {"retain": {"days": 14}},
+                            }
+                        }
+                    }
+                },
+                f"config/cameras/{CAMERA}/detect": {
+                    "cameras": {CAMERA: {"detect": {"enabled": False}}}
+                },
+                f"config/cameras/{CAMERA}/objects": {
+                    "cameras": {CAMERA: {"objects": {"track": ["person", "car"]}}}
+                },
+            },
+        )
+        settings = job["result"]["settings"]
+        self.assertEqual(
+            (settings["detect"], settings["recordDays"], settings["eventDays"]),
+            (False, 7, 14),
+        )
+        self.assertEqual(settings["objects"], ["person", "car"])
+
+    async def test_recording_off_stays_live(self):
+        frigate = Frigate()
+        job = await self.configure(frigate, record=False)
+        self.assertEqual(job["state"], "completed", job["error"])
+        self.assertEqual(frigate.restarts, 0)
+        self.assertFalse(frigate.config["cameras"][CAMERA]["record"]["enabled"])
+
+    async def test_recording_on_restarts_frigate(self):
+        # ffmpeg only writes recording segments when recording was on at start.
+        frigate = Frigate()
+        frigate.config["cameras"][CAMERA]["record"]["enabled"] = False
+        job = await self.configure(frigate, record=True, recordDays=3)
+        self.assertEqual(job["state"], "completed", job["error"])
+        self.assertEqual(frigate.restarts, 1)
+        (written,) = frigate.config_sets
+        self.assertNotIn("update_topic", written)
+        self.assertEqual(
+            written["config_data"],
+            {
+                "cameras": {
+                    CAMERA: {"record": {"enabled": True, "continuous": {"days": 3}}}
+                }
+            },
+        )
+        self.assertEqual(
+            (job["result"]["restarted"], job["result"]["fps"]), (True, 5.0)
+        )
+
+    async def test_legacy_retain_key(self):
+        frigate = Frigate()
+        frigate.config["cameras"][CAMERA]["record"]["retain"] = {"days": 0}
+        await self.configure(frigate, recordDays=5)
+        self.assertEqual(
+            frigate.config["cameras"][CAMERA]["record"]["retain"], {"days": 5}
+        )
+        self.assertNotIn("continuous", frigate.config["cameras"][CAMERA]["record"])
+
+    async def test_rejected_and_missing(self):
+        job = await self.configure(Frigate(reject=True), detect=False)
+        self.assertEqual(job["error"]["code"], "frigate_config_rejected")
+        frigate = Frigate()
+        b = bridge(frigate)
+        await b.start_configure(
+            {"operationId": OPERATION, "camera": "nope", "detect": False}
+        )
+        await b.active
+        self.assertEqual(b.job(OPERATION)["error"]["code"], "frigate_camera_not_found")
+
+    async def test_invalid_requests(self):
+        b = bridge(Frigate())
+        for changes in (
+            {},
+            {"recordDays": 400},
+            {"objects": []},
+            {"objects": ["unicorn"]},
+        ):
+            with self.assertRaises(m.FrigateError) as caught:
+                await b.start_configure(
+                    {"operationId": OPERATION, "camera": CAMERA, **changes}
+                )
+            self.assertEqual(caught.exception.code, "frigate_invalid_request")
+        self.assertIsNone(b.active)
+
+
 class ProbeTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.originals = (m.onvif_streams, m.rtsp_check)

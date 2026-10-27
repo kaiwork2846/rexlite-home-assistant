@@ -12,13 +12,17 @@
 
 | type | 參數 | 回傳 |
 | --- | --- | --- |
-| `rexlite/frigate/status` | – | `frigate`（reachable、version、uptime、restream）、`cameras`（camera、label、host、enabled、record、detect、ptz、fps、online、managed、placeholder）、`job` |
+| `rexlite/frigate/status` | – | `frigate`（reachable、version、uptime、restream）、`cameras`（camera、label、host、enabled、record、detect、recordDays、eventDays、objects、ptz、fps、online、managed、placeholder）、`job` |
 | `rexlite/frigate/discover` | `seconds`（1–8，預設 3） | `cameras`（host、port、name、hardware、vendor、configured、uninitialized）。在每個區網介面送 ONVIF WS-Discovery；只收宣告 `NetworkVideoTransmitter` 或 ONVIF scope 的回應（排除 Windows／NAS 的 WSD :5357） |
 | `rexlite/frigate/probe` | `host`、`port`、`username`、`password`、`rtspUrl`、`hint` | `device`、`vendor`、`onvif`、`streams`（uri、codec、width、height、ok、error）、`main`、`sub`、`existing`、`suggestedName`、`hints` |
 | `rexlite/frigate/activate` | `host`、`port`（ONVIF，預設 80）、`password`（9–32 字元） | `host`、`username`（`admin`）、`activated`、`clock` |
 | `rexlite/frigate/add` | `operationId`（UUID v4）、`name`、`host`、`main`、`sub`、帳密、`mainWidth/Height`、`subWidth/Height`、`record`、`detect`、`ptz`、`onvifPort` | 背景工作 |
 | `rexlite/frigate/job` | `jobId` | 背景工作 |
 | `rexlite/frigate/remove` | `operationId`、`camera` | 背景工作 |
+| `rexlite/frigate/camera_info` | `camera` | 攝影機本身的設定（ONVIF）：`host`、`port`、`ptz`（`presets`）、`image`（brightness、saturation、contrast、sharpness 的 value／min／max，`irCut`）、`clock`（ntp、server、timeZone、cameraTime、driftSeconds）；不支援的區段為 `null` |
+| `rexlite/frigate/webrtc` | `camera`、`offer`（瀏覽器 SDP，含全部 ICE candidates）、`quality`（`main`／`sub`，預設 `sub`）、`talk` | `answer`（go2rtc SDP）、`quality`、`qualities`、`talk`（攝影機接受麥克風聲音） |
+| `rexlite/frigate/camera_control` | `camera`、`op`（`move`、`stop`、`goto`、`save_preset`、`remove_preset`、`image`、`clock`、`quality`），依 op：`profile`、`quality`（width、height、fps、bitrate）、`direction`（up／down／left／right／zoom_in／zoom_out）、`speed`（0.1–1）、`seconds`（0.1–2）、`token`、`name`、`image`、`ntp`、`server` | 更新後的區段；`move`／`goto` 附一張移動後的畫面（base64 JPEG） |
+| `rexlite/frigate/configure` | `operationId`、`camera`，以及至少一項：`record`、`detect`、`recordDays`、`eventDays`（0–365）、`objects`（`person`、`car`、`motorcycle`、`bicycle`、`dog`、`cat`，至少一項） | 背景工作 |
 | `rexlite/frigate/snapshot` | `camera`、`height`（120–720） | base64 JPEG |
 
 ### probe
@@ -47,6 +51,32 @@
 - 偵測串流一律以軟體解碼（`ffmpeg.hwaccel_args: []`）。Frigate 預設 `auto` 在 Intel 主機會選 VAAPI；2026-10-23 Nick 林口設備的 VIGI C540V 子串流每 30–40 秒解碼失敗一次（`Failed to sync surface`），ffmpeg 重開約 300 次後 Frigate 檔案描述元用盡、看門狗執行緒停止，攝影機一直沒有畫面（平台顯示離線），重開攝影機也不會恢復。偵測串流小、5 fps，軟體解碼負擔很小。要寫 `[]` 而不是 `""`：空字串會讓 `/api/config/set` 刪掉這個鍵，又回到 `auto`。
 - go2rtc 串流網址的帳密以百分比編碼；Frigate 自己的 ffmpeg／ffprobe 路徑（無 go2rtc 時）用原始帳密，因為 Frigate 會再編碼一次。
 - 帳密只寫入主機上的 Frigate 設定；不寫入 HA 儲存、工作紀錄、結果或錯誤訊息。
+
+### camera_info／camera_control（攝影機本身設定）
+
+- 帳密：主機從本機 Frigate 的 `/api/config/raw` 讀這台攝影機的 `onvif` 帳密，沒有則用它的 go2rtc restream 或 ffmpeg 網址裡的帳密；只用於這次請求，不寫入 HA、不回傳、不出現在錯誤訊息。帳密含 Frigate 環境變數（`{FRIGATE_…}`）時回 `camera_credentials_missing`；攝影機改過密碼回 `camera_auth_failed`（請移除後重新加入）。
+- 直接以 ONVIF 連攝影機（先試 Frigate 設定的 `onvif.port`，再試 2020、80、8000、8899），不經 Frigate 的 PTZ：Frigate 只在啟動時讀預置點，新存的預置點要重啟才看得到。
+- `move`：主機送 `ContinuousMove`，`seconds` 後一定送 `Stop`；雲端斷線也不會讓攝影機一直轉。同一台攝影機的操作依序執行。
+- `goto`：`GotoPreset` 後等 2.5 秒取一張畫面；`move` 等 0.6 秒。畫面取自 Frigate `latest.jpg`（`X-Cache-Bypass`）。
+- `save_preset` 不帶 `token` 為新增，帶 `token` 為覆寫（目前位置＋新名稱）。
+- `image`：`SetImagingSettings`（`ForcePersistence`），欄位依 ONVIF 順序；`irCut` 為日夜模式：`AUTO`、`ON`（彩色）、`OFF`（黑白／紅外線）。
+- `clock`：`ntp: true` 寫入 NTP 伺服器（預設 `time.stdtime.gov.tw`）並改為 NTP 校時；`false` 以主機時間手動對時。兩者都寫入主機時區。
+
+### webrtc（即時影像與通話）
+
+- 只有這一次 SDP 交換經過雲端；影像與聲音由瀏覽器直連主機的 go2rtc（點對點），找不到直連路徑時才經平台的 TURN 轉送。瀏覽器應等 ICE 收集完成再送出 offer（非 trickle）。
+- 預設子串流，雲端流量最低；`main` 為主串流。
+- 通話：呼叫攝影機的 ONVIF 語音回傳通道（RTSP backchannel）。Frigate 的 restream 都關閉 backchannel（`#backchannel=0`），通話改用 `<camera>_talk`：主機以 Frigate 設定裡的串流網址（含帳密）向 go2rtc 建立（只在主機內），回傳的 `talk` 表示 go2rtc 的 answer 是否接收音訊（攝影機支援 backchannel）。
+- `quality`（`camera_control`）：ONVIF Media v1 `SetVideoEncoderConfiguration`，送回完整設定、只改解析度／幀率／位元率，`ForcePersistence`。解析度只能選攝影機 `GetVideoEncoderConfigurationOptions` 回報的值。改子串流解析度後，Frigate 會把偵測串流縮放到原本設定的偵測尺寸。
+
+### configure（攝影機設定）
+
+`recordDays` 是連續錄影保存天數（Frigate 0.16 起 `record.continuous.days`，舊版 `record.retain.days`）；`eventDays` 同時設定警報與偵測事件（`record.alerts.retain.days`、`record.detections.retain.days`）；`objects` 寫入 `objects.track`。`status` 回傳 Frigate 解析後的目前值（未設定時是 Frigate 預設：0.17 為連續 0 天、事件 10 天、只追蹤 `person`）。
+
+- 只寫有變更的欄位，每個區段（`record`、`detect`、`objects`）各以 `update_topic config/cameras/<camera>/<區段>` 即時套用，不重啟。
+- 例外：開啟錄影（原本關閉）時寫入後重啟 Frigate 並等畫面。ffmpeg 只有在啟動時錄影已開啟才會輸出錄影片段（`frigate/config/camera/camera.py`）；以 Frigate 0.17.1 容器實測，即時開啟後 40 秒沒有任何錄影檔，重啟後立即開始錄影。
+- 寫入後以 `X-Cache-Bypass: 1` 讀回設定：Frigate 的 nginx 會快取 `/api/config` 5 秒。
+- Frigate 的 `/api/stats` 中 `detection_enabled` 不會反映 `/api/config/set` 的即時變更（stats 用的是啟動時的設定物件），以 `/api/config` 為準。
 
 ### 為何加入與移除都重新啟動 Frigate
 
