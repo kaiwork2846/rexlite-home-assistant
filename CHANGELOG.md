@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.38
+
+- 新增 `rexlite/frigate/configure`（admin，背景工作）：MAX’Is 運營平台可直接修改已加入攝影機的錄影、偵測、連續錄影保存天數、事件保存天數與偵測物件（人、車、機車、腳踏車、狗、貓）。只寫有變更的欄位，以 Frigate 即時更新套用，不重啟；只有開啟錄影時會重啟 Frigate（約 1 分鐘），因為 ffmpeg 只有在啟動時錄影已開啟才會輸出錄影片段（Frigate 0.17.1 實測）。
+- `rexlite/frigate/status` 的每台攝影機加上 `recordDays`、`eventDays`、`objects`。
+- 新增 `rexlite/frigate/camera_info`、`rexlite/frigate/camera_control`（admin）：攝影機本身的設定，以 ONVIF 直接操作：PTZ 方向／變焦（主機端移動後一定停止）、預置點（前往、新增、覆寫、刪除）、影像（亮度、飽和度、對比、銳利度、日夜模式）、時間（NTP 自動校時或以主機時間對時）。帳密從本機 Frigate 設定讀取，只用於該次請求，不另外保存、不回傳。
+- 讀取 Frigate 畫面（`latest.jpg`）略過 nginx 5 秒快取。
+- 攝影機畫質：`camera_info` 回傳主／子串流的解析度、幀率、位元率與攝影機支援的選項；`camera_control` 的 `quality` 修改編碼設定（ONVIF Media）。
+- 新增 `rexlite/frigate/webrtc`（admin）：即時影像與通話的 WebRTC 信令，影像點對點直連主機的 go2rtc，不經雲端轉送；通話使用攝影機的 ONVIF 語音回傳通道（另開 `<camera>_talk` restream）。
+
 ## 0.1.37
 
 - 修正加入的攝影機過一段時間後一直離線：Frigate 預設自動選擇硬體解碼，在 Intel 主機會用 VAAPI。2026-10-23 Nick 林口設備的 VIGI C540V 子串流每 30–40 秒解碼失敗一次（`Failed to sync surface`），ffmpeg 重開約 300 次後 Frigate 檔案描述元用盡、看門狗執行緒停止，攝影機一直沒有畫面（平台顯示離線），重開攝影機也不會恢復。
