@@ -24,6 +24,12 @@
 | `rexlite/frigate/camera_control` | `camera`、`op`（`move`、`stop`、`goto`、`save_preset`、`remove_preset`、`image`、`clock`、`quality`），依 op：`profile`、`quality`（width、height、fps、bitrate）、`direction`（up／down／left／right／zoom_in／zoom_out）、`speed`（0.1–1）、`seconds`（0.1–2）、`token`、`name`、`image`、`ntp`、`server` | 更新後的區段；`move`／`goto` 附一張移動後的畫面（base64 JPEG） |
 | `rexlite/frigate/configure` | `operationId`、`camera`，以及至少一項：`record`、`detect`、`recordDays`、`eventDays`（0–365）、`objects`（`person`、`car`、`motorcycle`、`bicycle`、`dog`、`cat`，至少一項） | 背景工作 |
 | `rexlite/frigate/snapshot` | `camera`、`height`（120–720） | base64 JPEG |
+| `rexlite/frigate/vigi_info` | `camera` | VIGI OpenAPI：`openapi`（state `ok`／`off`／`auth_failed`／`locked`／`unreachable`／`error`、port、message）、`device`（model、alias、firmware、hardware、mac）、`vigi`、`lpr`、`dayNight`、`video`（main、sub）、`sdCard`（status、total、free、loop）、`plates`（LPR 機型：autoGate、trigger、`alarmServer` 的 host、port、path、protocol、lastContact）；不支援的區段為 `null` |
+| `rexlite/frigate/vigi_control` | `camera`、`op`（`gate`、`auto_gate`、`lpr_trigger`、`day_night`、`video_code`），依 op：`enabled`、`video`、`alarm`、`mode`（auto／day／night）、`main`／`sub`（H264、H265、H264+、H265+） | 更新後的區段 |
+| `rexlite/frigate/lpr_records` | `camera`、`start`、`end`（Unix 秒，最多 31 天，預設最近 24 小時）、`page`、`perPage`（1–50）、`plate` | `total`、`page`、`records`（time、plate、cameraList、eventType、thumbId、thumbSize、backgroundId、backgroundSize、device） |
+| `rexlite/frigate/lpr_image` | `camera`、`time`、`thumbId`、`backgroundId`、`which`（thumbnail／background／both） | base64 JPEG：`thumbnail`、`background`（沒要求的為 `null`） |
+| `rexlite/frigate/lpr_list` | `limit`（0–200，預設 50） | `entries`、`log`（新到舊）、`cameras`（各攝影機 autoGate、trigger） |
+| `rexlite/frigate/lpr_list_save` | `entries`（plate、kind `allow`／`block`、name、from、until、enabled；最多 2000 筆） | 整理後的 `entries` |
 
 ### probe
 
@@ -69,6 +75,15 @@
 - 通話：呼叫攝影機的 ONVIF 語音回傳通道（RTSP backchannel）。Frigate 的 restream 都關閉 backchannel（`#backchannel=0`），通話改用 `<camera>_talk`：主機以 Frigate 設定裡的串流網址（含帳密）向 go2rtc 建立（只在主機內），回傳的 `talk` 表示 go2rtc 的 answer 是否接收音訊（攝影機支援 backchannel）。
 - `quality`（`camera_control`）：ONVIF Media v1 `SetVideoEncoderConfiguration`，送回完整設定、只改解析度／幀率／位元率，`ForcePersistence`。解析度只能選攝影機 `GetVideoEncoderConfigurationOptions` 回報的值。改子串流解析度後，Frigate 會把偵測串流縮放到原本設定的偵測尺寸。
 
+### VIGI OpenAPI 與車牌辨識
+
+TP-Link 為 VIGI／InSight 攝影機公開的控制介面（「VIGI IPC Open API Document」V1.3；InSight LPR345Z 版第 6 章為車牌功能）。攝影機網頁「設定 → 網路設定 → OpenAPI」開啟後，HTTPS 20443 才會接受連線，埠被拒絕即視為未開啟（`camera_openapi_off`）。
+
+- 認證：`POST https://IP:20443` `{"method":"doAuth","params":null}` 取得 realm／nonce，回應值為 `SHA256(SHA256(admin:realm:password):nonce:SHA256(POST:doAuth))`，第二次 `doAuth` 回 `stok`；之後每個請求 `POST https://IP:20443/stok=<stok>`，每次新連線（`Connection: close`）。`stok` 在中樞保留 10 分鐘，攝影機回 `-10002`／`-10020` 時重新登入一次。
+- 用到的方法：`getDeviceInfo`、`getDayNightMode`／`setDayNightMode`、`getVideoCode`／`setVideoCode`（V1.2 起；舊韌體回 `-10003`，該區段為 `null`）、`getSdCardStatus`、`openBarrierGate`、`lprTriggerMode`（沒有讀取方法，中樞記住平台最後設定的值）、`getUserId` + `searchLprInfo`、`downloadLprImage`。
+- 錯誤碼對應：`-10013` → `camera_no_storage`（沒插 microSD，沒有車牌紀錄）、`-10003`／`-10030` → `camera_not_supported`、`-10020` → `camera_auth_failed`、`-10021`／`-10011`／`-10015` → `camera_busy`、`-10022` → `camera_locked`。
+- 平台名單與自動開閘：攝影機內建的白／黑名單沒有 API，名單存中樞 `.storage/rexlite.lpr`。攝影機「設定 → 事件 → Alarm Server」新增一筆：主機為中樞 IP（與攝影機同網段的那個）、埠為 HA 的 HTTP 埠、URL 為 `/api/webhook/<id>`、HTTP、可不附圖片。攝影機每辨識一次就送 `{"camid","date","plate"}`；中樞依來源 IP 找出 Frigate 裡的攝影機，查名單：白名單且該攝影機開啟自動開閘 → `openBarrierGate`（`opened`／失敗為 `gate_failed`），白名單但未開自動開閘 → `auto_off`，黑名單 → `blocked`，其他 → `none`。來源 IP 不是 Frigate 裡的攝影機時只記錄，不開閘。webhook 只接受區網（`local_only`）的 POST。
+
 ### configure（攝影機設定）
 
 `recordDays` 是連續錄影保存天數（Frigate 0.16 起 `record.continuous.days`，舊版 `record.retain.days`）；`eventDays` 同時設定警報與偵測事件（`record.alerts.retain.days`、`record.detections.retain.days`）；`objects` 寫入 `objects.track`。`status` 回傳 Frigate 解析後的目前值（未設定時是 Frigate 預設：0.17 為連續 0 天、事件 10 天、只追蹤 `person`）。
@@ -89,4 +104,4 @@ Frigate 0.16–0.17（含 0.17.1）的即時新增／移除不可靠，已以 Fr
 
 ## 錯誤碼
 
-`message` 為可直接顯示的繁體中文。`camera_*`：`camera_invalid_request`、`camera_unreachable`、`camera_auth_failed`、`camera_uninitialized`、`camera_weak_password`、`camera_not_vigi`、`camera_already_active`、`camera_activate_failed`、`camera_onvif_failed`、`camera_stream_not_found`、`camera_rtsp_failed`、`camera_discovery_failed`。`frigate_*`：`frigate_unreachable`、`frigate_unsupported`、`frigate_busy`、`frigate_camera_exists`、`frigate_codec_unsupported`、`frigate_config_rejected`、`frigate_restream_failed`、`frigate_stream_not_running`、`frigate_camera_not_found`、`frigate_job_not_found`、`frigate_snapshot_failed`、`frigate_interrupted`、`frigate_failed`。
+`message` 為可直接顯示的繁體中文。`camera_*`：`camera_invalid_request`、`camera_unreachable`、`camera_auth_failed`、`camera_uninitialized`、`camera_weak_password`、`camera_not_vigi`、`camera_already_active`、`camera_activate_failed`、`camera_onvif_failed`、`camera_stream_not_found`、`camera_rtsp_failed`、`camera_discovery_failed`、`camera_openapi_off`、`camera_openapi_failed`、`camera_not_supported`、`camera_no_storage`、`camera_busy`、`camera_locked`、`camera_search_failed`。`frigate_*`：`frigate_unreachable`、`frigate_unsupported`、`frigate_busy`、`frigate_camera_exists`、`frigate_codec_unsupported`、`frigate_config_rejected`、`frigate_restream_failed`、`frigate_stream_not_running`、`frigate_camera_not_found`、`frigate_job_not_found`、`frigate_snapshot_failed`、`frigate_interrupted`、`frigate_failed`。

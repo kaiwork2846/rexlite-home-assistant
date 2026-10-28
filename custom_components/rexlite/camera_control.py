@@ -50,6 +50,16 @@ IMAGE_FIELDS = (
     ("sharpness", "Sharpness"),
 )
 IR_CUT_MODES = ("AUTO", "ON", "OFF")
+_PAN_TILT_SPACES = {
+    "ContinuousPanTiltVelocitySpace",
+    "AbsolutePanTiltPositionSpace",
+    "RelativePanTiltTranslationSpace",
+}
+_ZOOM_SPACES = {
+    "ContinuousZoomVelocitySpace",
+    "AbsoluteZoomPositionSpace",
+    "RelativeZoomTranslationSpace",
+}
 DIRECTIONS = {
     "up": (0.0, 1.0, 0.0),
     "down": (0.0, -1.0, 0.0),
@@ -246,6 +256,16 @@ class CameraControl:
             if len(found) >= MAX_PRESETS:
                 break
         return found
+
+    async def ptz_axes(self) -> dict:
+        """Which moves the camera's PTZ node offers; a varifocal bullet only zooms."""
+
+        root = await self._call("PTZ", PTZ_NS, "GetNodes", "")
+        names = {_local(element.tag) for element in root.iter()}
+        return {
+            "panTilt": bool(names & _PAN_TILT_SPACES),
+            "zoom": bool(names & _ZOOM_SPACES),
+        }
 
     def _profile_xml(self) -> str:
         if not self.profile:
@@ -579,8 +599,13 @@ class CameraControl:
             with contextlib.suppress(CameraError):
                 result["quality"] = await self.quality() or None
         if "PTZ" in self.urls and self.profile:
+            ptz: dict[str, Any] = {}
             with contextlib.suppress(CameraError):
-                result["ptz"] = {"presets": await self.presets()}
+                ptz["presets"] = await self.presets()
+            with contextlib.suppress(CameraError):
+                ptz.update(await self.ptz_axes())
+            if ptz:
+                result["ptz"] = {"presets": [], **ptz}
         if "Imaging" in self.urls and self.source:
             with contextlib.suppress(CameraError):
                 result["image"] = await self.image() or None
