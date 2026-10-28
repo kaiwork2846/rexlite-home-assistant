@@ -487,11 +487,18 @@ class AddTests(unittest.IsolatedAsyncioTestCase):
             },
         )
         self.assertEqual([c[0] for c in self.checks], [ADD["main"], ADD["sub"]])
-        # Credentials stay in Frigate's config: never in jobs, results or HA storage.
+        # Credentials never reach jobs or results; HA storage keeps them only
+        # in the remembered credentials, so the camera can be added again.
         public = json.dumps(b.job(OPERATION), ensure_ascii=False)
         self.assertNotIn(PASSWORD, public)
         self.assertTrue(store.saved)
-        self.assertFalse(any(PASSWORD in saved for saved in store.saved))
+        for saved in store.saved:
+            outside = {k: v for k, v in json.loads(saved).items() if k != "credentials"}
+            self.assertNotIn(PASSWORD, json.dumps(outside, ensure_ascii=False))
+        remembered = next(iter(store.data["credentials"].values()))
+        self.assertEqual(
+            (remembered["password"], remembered["source"]), (PASSWORD, "add")
+        )
         self.assertIn("vigi_c540v", store.data["managed"])
         status = await b.status()
         self.assertTrue(
