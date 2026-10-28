@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import __version__ as home_assistant_version
 from homeassistant.core import HomeAssistant
@@ -31,6 +33,8 @@ from .runtime import TunnelConfig
 
 type REXLiTEConfigEntry = ConfigEntry[REXLiTECoordinator]
 
+_LOGGER = logging.getLogger(__name__)
+
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
 
@@ -39,7 +43,7 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     from homeassistant.helpers.start import async_at_started
 
     from .device_discovery import register_device_discovery
-    from .frigate_bridge import register_frigate_bridge
+    from .frigate_bridge import async_register_plate_webhook, register_frigate_bridge
     from .hacs_bind import register_hacs_bind
     from .knx_project_deployment import register_websocket_commands
     from .network_traffic_api import async_register_network_traffic
@@ -49,7 +53,11 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     register_device_discovery(hass)
     register_thread_border_routers(hass)
     register_node_red_bridge(hass)
-    register_frigate_bridge(hass)
+    frigate = register_frigate_bridge(hass)
+    try:
+        await async_register_plate_webhook(hass, frigate)
+    except Exception:  # noqa: BLE001 - plates are optional; the rest must load
+        _LOGGER.exception("Could not register the license plate webhook")
     register_hacs_bind(hass)
     deployer = register_websocket_commands(hass)
     await async_register_network_traffic(hass)

@@ -39,6 +39,13 @@ at start (``frigate/config/camera/camera.py``), so that one restarts Frigate.
 Camera credentials are written into the Frigate configuration on this hub
 (that is where Frigate needs them) and nowhere else: not into HA storage, job
 records, results or error messages.
+
+TP-Link VIGI / InSight cameras also get their own settings through the
+vendor's OpenAPI (``vigi_openapi``): day/night, encoding, microSD status and,
+on license plate models, the barrier gate, the trigger mode and the plate
+records. The platform's plate list and the automatic gate live in
+``lpr_gate``; plates arrive through a LAN-only webhook the camera's Alarm
+Server posts to.
 """
 
 from __future__ import annotations
@@ -59,6 +66,7 @@ from .camera_control import (
     DIRECTIONS,
     IR_CUT_MODES,
     CameraControl,
+    _yaml,
     camera_access,
     stream_sources,
 )
@@ -77,10 +85,27 @@ from .camera_probe import (
     with_credentials,
     with_raw_credentials,
 )
+from .lpr_gate import PlateGate, alarm_report, normalize_plate
+from .vigi_openapi import (
+    DAY_NIGHT_MODES,
+    OPENAPI_PORT,
+    VIDEO_CODES,
+    VigiOpenApi,
+)
 from .vigi_setup import vigi_activate, vigi_state
 
 DATA_KEY = "rexlite_frigate"
 STORE_KEY = "rexlite.frigate"
+PLATE_STORE_KEY = "rexlite.lpr"
+PLATE_EVENT = "rexlite_lpr"
+# The longest plate-record search the camera is asked for.
+MAX_RECORD_DAYS = 31
+_OPENAPI_STATES = {
+    "camera_openapi_off": "off",
+    "camera_auth_failed": "auth_failed",
+    "camera_locked": "locked",
+    "camera_unreachable": "unreachable",
+}
 BRIDGE_API_VERSION = 1
 FRIGATE_CANDIDATES = ("http://127.0.0.1:5050", "http://127.0.0.1:5000")
 GO2RTC_URL = "http://127.0.0.1:1984"
@@ -534,6 +559,9 @@ class FrigateBridge:
         verify_seconds: float = 90,
         restart_seconds: float = 180,
         drain_seconds: float = 15,
+        plate_store: Any = None,
+        fire_event: Callable[[dict], None] | None = None,
+        http_port: Callable[[], int] | None = None,
     ) -> None:
         self.store = store
         self.session = session
@@ -555,6 +583,19 @@ class FrigateBridge:
         self.active: asyncio.Task | None = None
         # One ONVIF operation per camera at a time (a move ends with a stop).
         self.camera_locks: dict[str, asyncio.Lock] = {}
+        # OpenAPI session tokens, per camera and password. OpenAPI requests
+        # queue on their own lock, so a slow camera never holds up ONVIF.
+        self.vigi_tokens: dict[str, tuple[str, float]] = {}
+        self.vigi_locks: dict[str, asyncio.Lock] = {}
+        self.http_port = http_port or (lambda: 8123)
+        self.plates = PlateGate(
+            plate_store if plate_store is not None else _MemoryStore(),
+            open_gate=self._open_gate,
+            fire=fire_event or (lambda _event: None),
+        )
+        # Alarm Server packets name no camera: the sender's IP does.
+        self.host_cameras: dict[str, tuple[str, str]] = {}
+        self.host_cameras_at = -1e9
 
     # Storage ---------------------------------------------------------------
 
@@ -1295,6 +1336,7 @@ class FrigateBridge:
         restarted = await self._take_out(job, api, camera, owned)
         self.data["managed"].pop(camera, None)
         await self._save()
+        await self.plates.forget_camera(camera)
         return {"camera": camera, "removed": True, "restarted": restarted}
 
     async def _configure(self, job: dict, camera: str, changes: dict) -> dict:
@@ -1444,6 +1486,203 @@ class FrigateBridge:
             "answer": answer,
         }
 
+    # VIGI OpenAPI and license plates ----------------------------------------
+
+    async def _openapi(self, camera: str) -> tuple[dict, VigiOpenApi]:
+        if not _CAMERA.match(camera):
+            raise FrigateError("frigate_invalid_request", "攝影機名稱不正確")
+        api = await self.api()
+        raw = await api.raw_config()
+        access = camera_access(raw, camera)
+        access["label"] = camera_label(raw, camera)
+        return access, VigiOpenApi(
+            self.session, access["host"], access["password"], tokens=self.vigi_tokens
+        )
+
+    async def _open_gate(self, camera: str) -> None:
+        _access, openapi = await self._openapi(camera)
+        await openapi.open_gate()
+
+    async def _onvif_device(self, access: dict) -> dict:
+        """Manufacturer and model over ONVIF, for a camera whose OpenAPI is off."""
+
+        control = CameraControl(self.session, access, seconds=4)
+        with contextlib.suppress(CameraError):
+            await control.connect()
+            if control.client is not None:
+                return await control.client.device_information()
+        return {}
+
+    async def _alarm_server(self, camera: str, host: str) -> dict:
+        """What to enter in the camera's 設定 → 事件 → Alarm Server."""
+
+        addresses: list[str] = []
+        if self.interfaces is not None:
+            with contextlib.suppress(Exception):
+                addresses = list(await self.interfaces())
+        return {
+            "host": nearest_address(addresses, host),
+            "port": self.http_port(),
+            "path": f"/api/webhook/{await self.plates.webhook_id()}",
+            "protocol": "HTTP",
+            "lastContact": await self.plates.last_contact(camera),
+        }
+
+    async def vigi_info(self, msg: dict) -> dict:
+        """The camera's own OpenAPI settings; a section it lacks is null."""
+
+        camera = str(msg.get("camera") or "")
+        async with self.vigi_locks.setdefault(camera, asyncio.Lock()):
+            access, openapi = await self._openapi(camera)
+            result: dict[str, Any] = {
+                "camera": camera,
+                "host": access["host"],
+                "openapi": {"state": "ok", "port": OPENAPI_PORT, "message": None},
+                "device": None,
+                "vigi": False,
+                "lpr": False,
+                "dayNight": None,
+                "video": None,
+                "sdCard": None,
+                "plates": None,
+            }
+            try:
+                device = await openapi.device()
+            except CameraError as err:
+                result["openapi"].update(
+                    state=_OPENAPI_STATES.get(err.code, "error"), message=err.message
+                )
+                onvif = await self._onvif_device(access)
+                device = {
+                    "model": onvif.get("model") or None,
+                    "alias": None,
+                    "firmware": onvif.get("firmware") or None,
+                    "hardware": None,
+                    "mac": None,
+                }
+            else:
+                for key, read in (
+                    ("dayNight", openapi.day_night),
+                    ("video", openapi.video_code),
+                    ("sdCard", openapi.sd_card),
+                ):
+                    with contextlib.suppress(CameraError):
+                        result[key] = await read()
+            model = str(device.get("model") or "")
+            result["device"] = device
+            result["vigi"] = result["openapi"]["state"] == "ok" or bool(
+                re.search(r"vigi|insight", model, re.IGNORECASE)
+            )
+            result["lpr"] = "LPR" in model.upper()
+            if result["lpr"]:
+                result["plates"] = {
+                    **await self.plates.camera_settings(camera),
+                    "alarmServer": await self._alarm_server(camera, access["host"]),
+                }
+            return result
+
+    async def vigi_control(self, msg: dict) -> dict:
+        camera, op = str(msg.get("camera") or ""), str(msg.get("op") or "")
+        async with self.vigi_locks.setdefault(camera, asyncio.Lock()):
+            access, openapi = await self._openapi(camera)
+            result: dict[str, Any] = {"camera": camera, "op": op}
+            if op == "gate":
+                await openapi.open_gate()
+                await self.plates.log_manual(camera, access["label"])
+            elif op == "auto_gate":
+                result["plates"] = await self.plates.set_camera(
+                    camera, autoGate=bool(msg.get("enabled"))
+                )
+            elif op == "lpr_trigger":
+                video, alarm = bool(msg.get("video")), bool(msg.get("alarm"))
+                if not (video or alarm):
+                    raise FrigateError(
+                        "frigate_invalid_request", "至少要開啟一種觸發方式"
+                    )
+                await openapi.set_lpr_trigger(video, alarm)
+                result["plates"] = await self.plates.set_camera(
+                    camera, trigger={"video": video, "alarm": alarm}
+                )
+            elif op == "day_night":
+                await openapi.set_day_night(str(msg.get("mode") or ""))
+                result["dayNight"] = await openapi.day_night()
+            elif op == "video_code":
+                await openapi.set_video_code(msg.get("main"), msg.get("sub"))
+                with contextlib.suppress(CameraError):
+                    result["video"] = await openapi.video_code()
+            else:
+                raise FrigateError("frigate_invalid_request", "不支援的攝影機操作")
+            return result
+
+    async def lpr_records(self, msg: dict) -> dict:
+        """The camera's own plate records (kept on its microSD card)."""
+
+        camera = str(msg.get("camera") or "")
+        end = int(msg["end"] if msg.get("end") is not None else time.time())
+        start = int(msg["start"] if msg.get("start") is not None else end - 86400)
+        if start >= end or end - start > MAX_RECORD_DAYS * 86400:
+            raise FrigateError(
+                "frigate_invalid_request", f"查詢區間需在 {MAX_RECORD_DAYS} 天內"
+            )
+        async with self.vigi_locks.setdefault(camera, asyncio.Lock()):
+            _access, openapi = await self._openapi(camera)
+            found = await openapi.plate_records(
+                start,
+                end,
+                int(msg.get("page") or 1),
+                int(msg.get("perPage") or 20),
+                normalize_plate(msg.get("plate")),
+            )
+        return {"camera": camera, "start": start, "end": end, **found}
+
+    async def lpr_image(self, msg: dict) -> dict:
+        """One record's pictures; only the ones asked for cross the cloud."""
+
+        camera = str(msg.get("camera") or "")
+        want = str(msg.get("which") or "thumbnail")
+        async with self.vigi_locks.setdefault(camera, asyncio.Lock()):
+            _access, openapi = await self._openapi(camera)
+            images = await openapi.plate_images(
+                int(msg["time"]), msg.get("thumbId"), msg.get("backgroundId")
+            )
+        return {
+            "camera": camera,
+            "time": int(msg["time"]),
+            "contentType": "image/jpeg",
+            "thumbnail": images["thumbnail"] if want in ("thumbnail", "both") else None,
+            "background": images["background"]
+            if want in ("background", "both")
+            else None,
+        }
+
+    async def lpr_list(self, msg: dict) -> dict:
+        return await self.plates.snapshot(int(msg.get("limit") or 50))
+
+    async def lpr_list_save(self, msg: dict) -> dict:
+        return {"entries": await self.plates.replace(msg.get("entries"))}
+
+    async def _camera_for_host(self, host: str) -> tuple[str | None, str | None]:
+        now = time.monotonic()
+        stale = now - self.host_cameras_at > 60
+        # An unknown sender re-reads the config at most every 5 seconds.
+        if (stale or host not in self.host_cameras) and now - self.host_cameras_at > 5:
+            with contextlib.suppress(FrigateError, CameraError):
+                raw = await (await self.api()).raw_config()
+                self.host_cameras = cameras_by_host(raw)
+                self.host_cameras_at = now
+        return self.host_cameras.get(host, (None, None))
+
+    async def plate_report(self, sender: str, body: Any) -> dict | None:
+        """One Alarm Server packet from a camera on the LAN."""
+
+        report = alarm_report(body)
+        if report is None:
+            return None
+        camera, label = await self._camera_for_host(sender)
+        return await self.plates.report(
+            camera, label or report.get("camid") or sender, report
+        )
+
     async def _settled_frame(
         self, api: FrigateApi, camera: str, seconds: float
     ) -> str | None:
@@ -1466,6 +1705,51 @@ class FrigateBridge:
             "data": base64.b64encode(image).decode(),
             "capturedAt": _now(),
         }
+
+
+class _MemoryStore:
+    """Stands in for HA's Store where none is given (tests)."""
+
+    def __init__(self) -> None:
+        self.data: Any = None
+
+    async def async_load(self) -> Any:
+        return self.data
+
+    async def async_save(self, data: Any) -> None:
+        self.data = json.loads(json.dumps(data))
+
+
+def camera_label(raw: str, camera: str) -> str:
+    cameras = _yaml(raw).get("cameras")
+    current = cameras.get(camera) if isinstance(cameras, dict) else None
+    label = current.get("friendly_name") if isinstance(current, dict) else None
+    return str(label or camera)[:60]
+
+
+def cameras_by_host(raw: str) -> dict[str, tuple[str, str]]:
+    """Camera IP → (Frigate camera, label), for cameras whose access is known."""
+
+    cameras = _yaml(raw).get("cameras")
+    found: dict[str, tuple[str, str]] = {}
+    for name in cameras if isinstance(cameras, dict) else {}:
+        with contextlib.suppress(CameraError):
+            found[camera_access(raw, str(name))["host"]] = (
+                str(name),
+                camera_label(raw, str(name)),
+            )
+    return found
+
+
+def nearest_address(addresses: list[str], host: str) -> str | None:
+    """The hub address the camera reaches most directly: same /24, then /16."""
+
+    target = host.split(".")
+    for width in (3, 2):
+        for address in addresses:
+            if address.split(".")[:width] == target[:width]:
+                return address
+    return addresses[0] if addresses else None
 
 
 def _days(value: Any) -> int | None:
@@ -1643,6 +1927,11 @@ def register_frigate_bridge(hass: Any) -> FrigateBridge:
         interfaces=interfaces,
         integration_version=INTEGRATION_VERSION,
         time_zone=lambda: hass.config.time_zone,
+        plate_store=Store(hass, 1, PLATE_STORE_KEY, private=True),
+        fire_event=lambda data: hass.bus.async_fire(PLATE_EVENT, data),
+        http_port=lambda: int(
+            getattr(getattr(hass, "http", None), "server_port", None) or 8123
+        ),
     )
 
     def handler(name: str, schema: dict, run: Callable):
@@ -1673,6 +1962,8 @@ def register_frigate_bridge(hass: Any) -> FrigateBridge:
     operation = vol.All(str, vol.Length(min=36, max=36))
     camera = vol.All(str, vol.Match(_CAMERA))
     days = vol.All(vol.Coerce(int), vol.Range(min=0, max=MAX_RETAIN_DAYS))
+    epoch = vol.All(vol.Coerce(int), vol.Range(min=0, max=4_102_444_800))
+    file_id = vol.All(str, vol.Length(min=1, max=64), vol.Match(r"^[A-Za-z0-9_-]+$"))
     commands = (
         handler("status", {}, lambda msg: bridge.status()),
         handler(
@@ -1821,7 +2112,101 @@ def register_frigate_bridge(hass: Any) -> FrigateBridge:
             },
             bridge.snapshot,
         ),
+        handler("vigi_info", {vol.Required("camera"): camera}, bridge.vigi_info),
+        handler(
+            "vigi_control",
+            {
+                vol.Required("camera"): camera,
+                vol.Required("op"): vol.In(
+                    ("gate", "auto_gate", "lpr_trigger", "day_night", "video_code")
+                ),
+                vol.Optional("enabled"): bool,
+                vol.Optional("video"): bool,
+                vol.Optional("alarm"): bool,
+                vol.Optional("mode"): vol.In(DAY_NIGHT_MODES),
+                vol.Optional("main"): vol.In(VIDEO_CODES),
+                vol.Optional("sub"): vol.In(VIDEO_CODES),
+            },
+            bridge.vigi_control,
+        ),
+        handler(
+            "lpr_records",
+            {
+                vol.Required("camera"): camera,
+                vol.Optional("start"): epoch,
+                vol.Optional("end"): epoch,
+                vol.Optional("page", default=1): vol.All(
+                    vol.Coerce(int), vol.Range(min=1, max=10000)
+                ),
+                vol.Optional("perPage", default=20): vol.All(
+                    vol.Coerce(int), vol.Range(min=1, max=50)
+                ),
+                vol.Optional("plate", default=""): vol.All(str, vol.Length(max=20)),
+            },
+            bridge.lpr_records,
+        ),
+        handler(
+            "lpr_image",
+            {
+                vol.Required("camera"): camera,
+                vol.Required("time"): epoch,
+                vol.Optional("thumbId"): vol.Any(None, file_id),
+                vol.Optional("backgroundId"): vol.Any(None, file_id),
+                vol.Optional("which", default="thumbnail"): vol.In(
+                    ("thumbnail", "background", "both")
+                ),
+            },
+            bridge.lpr_image,
+        ),
+        handler(
+            "lpr_list",
+            {
+                vol.Optional("limit", default=50): vol.All(
+                    vol.Coerce(int), vol.Range(min=0, max=200)
+                )
+            },
+            bridge.lpr_list,
+        ),
+        handler(
+            "lpr_list_save",
+            {vol.Required("entries"): vol.All(list, vol.Length(max=2000))},
+            bridge.lpr_list_save,
+        ),
     )
     for command in commands:
         websocket_api.async_register_command(hass, command)
     return bridge
+
+
+async def async_register_plate_webhook(hass: Any, bridge: FrigateBridge) -> None:
+    """The LAN-only webhook a license plate camera's Alarm Server posts to."""
+
+    import logging
+
+    from aiohttp import web
+    from homeassistant.components import webhook
+
+    from .const import DOMAIN
+
+    logger = logging.getLogger(__name__)
+
+    async def handle(hass: Any, webhook_id: str, request: Any) -> Any:
+        try:
+            body = await request.json()
+        except ValueError:
+            return web.Response(status=400)
+        try:
+            await bridge.plate_report(str(request.remote or ""), body)
+        except Exception:  # noqa: BLE001 - the camera only needs its 200
+            logger.exception("License plate report failed")
+        return web.Response(status=200)
+
+    webhook.async_register(
+        hass,
+        DOMAIN,
+        "REXLiTE 車牌辨識",
+        await bridge.plates.webhook_id(),
+        handle,
+        local_only=True,
+        allowed_methods=["POST"],
+    )

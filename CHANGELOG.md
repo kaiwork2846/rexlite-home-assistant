@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.39
+
+- 新增 TP-Link VIGI／InSight 攝影機的原廠 OpenAPI（官方「VIGI IPC Open API Document」V1.3，InSight LPR345Z 版加上車牌功能）：`rexlite/frigate/vigi_info`、`rexlite/frigate/vigi_control`（admin）。讀取型號／韌體、日夜模式（自動／白天／夜間）、主／子串流編碼（H.264、H.265、H.264+、H.265+）、microSD 狀態；可修改日夜模式與編碼。攝影機需先在網頁「設定 → 網路設定 → OpenAPI」開啟（HTTPS 20443）；沒開啟時回 `openapi.state = "off"` 與開啟說明。認證為官方兩段式 `doAuth`（SHA-256），帳密從本機 Frigate 設定讀取，不回傳、不記錄。
+- 車牌辨識（InSight LPR 機型）：遠端開閘（`openBarrierGate`，攝影機繼電器）、辨識觸發方式（畫面／警報輸入，`lprTriggerMode`）、`rexlite/frigate/lpr_records` 查詢攝影機 microSD 上的車牌紀錄（車牌、時間、攝影機名單類別）、`rexlite/frigate/lpr_image` 下載車牌特寫與現場畫面（只回傳要求的那張）。
+- 平台車牌名單：攝影機內建的白名單／黑名單沒有 API，名單改存中樞（`rexlite/frigate/lpr_list`、`lpr_list_save`，最多 2000 筆，可設名稱、開始日、到期日、停用）。攝影機的 Alarm Server 指向中樞的 LAN 專用 webhook（`/api/webhook/<id>`，`vigi_info` 回傳要填的主機、埠、URL）；辨識到白名單車牌且該攝影機開啟「自動開閘」時，中樞以 OpenAPI 開閘；黑名單只記錄。每次判斷保留最近 200 筆並觸發 `rexlite_lpr` 事件供自動化使用；同一台車 8 秒內重複回報只處理一次。
+- `camera_info` 的 `ptz` 加上 `panTilt`、`zoom`（ONVIF `GetNodes`），只能變焦的槍型攝影機（如 InSight LPR345Z）不再顯示方向鍵。
+- `manifest.json` 的 `dependencies` 加入 `webhook`。
+
 ## 0.1.38
 
 - 新增 `rexlite/frigate/configure`（admin，背景工作）：MAX’Is 運營平台可直接修改已加入攝影機的錄影、偵測、連續錄影保存天數、事件保存天數與偵測物件（人、車、機車、腳踏車、狗、貓）。只寫有變更的欄位，以 Frigate 即時更新套用，不重啟；只有開啟錄影時會重啟 Frigate（約 1 分鐘），因為 ffmpeg 只有在啟動時錄影已開啟才會輸出錄影片段（Frigate 0.17.1 實測）。
