@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.40
+
+- VIGI 一鍵開通支援 InSight 機型（如 InSight LPR345Z）：先走官方 OpenAPI 初始化（VIGI IPC Open API Document V1.3 §2.4：`https://<ip>/openapi/initialize` 的 `getEncrptInfo` 取得攝影機自己的 RSA 金鑰，再 `setPassword`），不支援時才用原本攝影機網頁的 `set_password`（VIGI C540V）。網頁 API 沒有回應開通狀態的攝影機，以 OpenAPI 初始化是否開放判斷是否為全新／重置。`activate` 回傳 `method`（`openapi`／`web`）。
+- 開通密碼規則同時符合兩種方式：10–32 個可列印字元，含大寫、小寫、數字、符號，不可有 2 個相同的連續字元或 3 個連續字元（`abc`、`123`），不可含 `admin`。
+- 中樞記住攝影機密碼（HA 私有儲存 `.storage/rexlite.frigate`，以 MAC 為鍵，IP 變更仍認得）：一鍵開通設定的密碼、加入成功的帳密、移除攝影機時 Frigate 設定裡的帳密都會記住。`discover` 對已記住密碼的攝影機標出 `remembered`（並以中樞 ARP 表補上 `mac`）；`probe`、`add` 沒有帶帳密時自動使用記住的密碼，重置後開通、移除後重新加入都不必再輸入。結果與錯誤訊息仍不含密碼。
+- 新增 `rexlite/frigate/vigi_password`（admin）：管理員查看攝影機密碼（例如登入攝影機網頁開啟 OpenAPI、設定 Alarm Server），依 `camera`（Frigate 攝影機）或 `host`。
+
 ## 0.1.39
 
 - 新增 TP-Link VIGI／InSight 攝影機的原廠 OpenAPI（官方「VIGI IPC Open API Document」V1.3，InSight LPR345Z 版加上車牌功能）：`rexlite/frigate/vigi_info`、`rexlite/frigate/vigi_control`（admin）。讀取型號／韌體、日夜模式（自動／白天／夜間）、主／子串流編碼（H.264、H.265、H.264+、H.265+）、microSD 狀態；可修改日夜模式與編碼。攝影機需先在網頁「設定 → 網路設定 → OpenAPI」開啟（HTTPS 20443）；沒開啟時回 `openapi.state = "off"` 與開啟說明。認證為官方兩段式 `doAuth`（SHA-256），帳密從本機 Frigate 設定讀取，不回傳、不記錄。
