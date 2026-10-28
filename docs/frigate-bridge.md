@@ -24,6 +24,7 @@
 | `rexlite/frigate/camera_control` | `camera`、`op`（`move`、`stop`、`goto`、`save_preset`、`remove_preset`、`image`、`clock`、`quality`），依 op：`profile`、`quality`（width、height、fps、bitrate）、`direction`（up／down／left／right／zoom_in／zoom_out）、`speed`（0.1–1）、`seconds`（0.1–2）、`token`、`name`、`image`、`ntp`、`server` | 更新後的區段；`move`／`goto` 附一張移動後的畫面（base64 JPEG） |
 | `rexlite/frigate/configure` | `operationId`、`camera`，以及至少一項：`record`、`detect`、`recordDays`、`eventDays`（0–365）、`objects`（`person`、`car`、`motorcycle`、`bicycle`、`dog`、`cat`，至少一項） | 背景工作 |
 | `rexlite/frigate/snapshot` | `camera`、`height`（120–720） | base64 JPEG |
+| `rexlite/frigate/vigi_password` | `camera` 或 `host` | `host`、`username`、`password`、`source`（activate／add／frigate）、`at`；只給管理員查看，例如登入攝影機網頁 |
 | `rexlite/frigate/vigi_info` | `camera` | VIGI OpenAPI：`openapi`（state `ok`／`off`／`auth_failed`／`locked`／`unreachable`／`error`、port、message）、`device`（model、alias、firmware、hardware、mac）、`vigi`、`lpr`、`dayNight`、`video`（main、sub）、`sdCard`（status、total、free、loop）、`plates`（LPR 機型：autoGate、trigger、`alarmServer` 的 host、port、path、protocol、lastContact）；不支援的區段為 `null` |
 | `rexlite/frigate/vigi_control` | `camera`、`op`（`gate`、`auto_gate`、`lpr_trigger`、`day_night`、`video_code`），依 op：`enabled`、`video`、`alarm`、`mode`（auto／day／night）、`main`／`sub`（H264、H265、H264+、H265+） | 更新後的區段 |
 | `rexlite/frigate/lpr_records` | `camera`、`start`、`end`（Unix 秒，最多 31 天，預設最近 24 小時）、`page`、`perPage`（1–50）、`plate` | `total`、`page`、`records`（time、plate、cameraList、eventType、thumbId、thumbSize、backgroundId、backgroundSize、device） |
@@ -43,11 +44,12 @@
 
 全新或重置的 TP-Link VIGI 攝影機會回應 ONVIF 搜尋，但在網頁設定 `admin` 密碼前拒絕所有登入。中樞代替攝影機網頁送出同樣的匿名請求，安裝人員不必開攝影機網頁：
 
-1. 偵測：`POST https://IP/` `{"method":"do","user_management":{"get_encrypt_info":null}}`，`data.code` 為 `-40405` 即未開通。`discover` 只對未加入的 TP-Link 攝影機查詢並標 `uninitialized`；`probe` 帳密錯誤時也會查，未開通回 `camera_uninitialized`。攝影機 HTTPS 偶爾斷線，查詢失敗會重試一次。
-2. 開通：`{"method":"do","set_password":{…}}`，`username` 為 `admin`，`ciphertext` 是以攝影機網頁內建 RSA 公鑰（PKCS#1 v1.5）加密後 base64、URL 編碼的密碼；預設三個安全問題、答案留空，語言設繁體中文（攝影機支援時）。
+1. 偵測：`POST https://IP/` `{"method":"do","user_management":{"get_encrypt_info":null}}`，`data.code` 為 `-40405` 即未開通。網頁 API 沒有回應開通狀態時（InSight 機型），改問官方 OpenAPI 初始化：`POST https://IP/openapi/initialize` `{"method":"getEncrptInfo"}` 有回傳 `result.encryptInfo.rsakey` 即未開通（只在設定第一組密碼前開放）。`discover` 只對未加入的 TP-Link 攝影機查詢並標 `uninitialized`；`probe` 帳密錯誤時也會查，未開通回 `camera_uninitialized`。攝影機 HTTPS 偶爾斷線，查詢失敗會重試一次。
+2. 開通：有 OpenAPI 初始化時先用它：以攝影機回傳的 RSA 公鑰（SubjectPublicKeyInfo，PKCS#1 v1.5）加密密碼，`{"method":"setPassword","params":{"encrypted_password":…}}`。沒有或失敗、且網頁 API 顯示未開通時，改用網頁的 `{"method":"do","set_password":{…}}`：`username` 為 `admin`，`ciphertext` 是以攝影機網頁內建 RSA 公鑰加密後 base64、URL 編碼的密碼；預設三個安全問題、答案留空，語言設繁體中文（攝影機支援時）。回傳 `method`（`openapi`／`web`）。
 3. 時鐘：以 ONVIF `SetSystemDateAndTime` 寫入中樞時間與時區（`Asia/Taipei` → `UTC-8`），取代攝影機網頁的國家／時區欄位。
+4. 記住：開通成功的密碼記在中樞（見「記住攝影機密碼」），接著的 `probe`／`add` 不必再帶密碼。
 
-密碼規則與攝影機相同：9–32 個可列印字元，含大寫、小寫、數字、符號，不可有 3 個相同或連續字元（`aaa`、`abc`、`123`），不可含 `admin`；不符時不送出（`camera_weak_password`）。密碼只用於這次請求。2026-10-23 以 VIGI C540V（韌體 2.2.0）實測：開通、時區、ONVIF 與 RTSP 主／子串流皆正常。
+密碼規則同時符合兩種方式：10–32 個可列印字元，含大寫、小寫、數字、符號，不可有 2 個相同的連續字元或 3 個連續字元（`abc`、`123`），不可含 `admin`；不符時不送出（`camera_weak_password`）。2026-10-23 以 VIGI C540V（韌體 2.2.0）實測網頁方式：開通、時區、ONVIF 與 RTSP 主／子串流皆正常；OpenAPI 初始化依官方文件實作，尚未以實機測試。
 
 ### add
 
@@ -74,6 +76,10 @@
 - 預設子串流，雲端流量最低；`main` 為主串流。
 - 通話：呼叫攝影機的 ONVIF 語音回傳通道（RTSP backchannel）。Frigate 的 restream 都關閉 backchannel（`#backchannel=0`），通話改用 `<camera>_talk`：主機以 Frigate 設定裡的串流網址（含帳密）向 go2rtc 建立（只在主機內），回傳的 `talk` 表示 go2rtc 的 answer 是否接收音訊（攝影機支援 backchannel）。
 - `quality`（`camera_control`）：ONVIF Media v1 `SetVideoEncoderConfiguration`，送回完整設定、只改解析度／幀率／位元率，`ForcePersistence`。解析度只能選攝影機 `GetVideoEncoderConfigurationOptions` 回報的值。改子串流解析度後，Frigate 會把偵測串流縮放到原本設定的偵測尺寸。
+
+### 記住攝影機密碼
+
+中樞把攝影機帳密記在 HA 私有儲存（`.storage/rexlite.frigate`，只有擁有者可讀），以 MAC 為鍵（WS-Discovery scope 或中樞 `/proc/net/arp`），IP 變更也認得；只用 IP 比對時，若 MAC 顯示是另一台攝影機就不使用。記住的時機：一鍵開通成功、加入成功、移除攝影機前（Frigate 設定裡的帳密）。`discover` 對還沒加入、已開通且有記住密碼的攝影機標出 `remembered`；`probe`／`add` 沒帶帳密時用記住的密碼，`probe` 回傳 `remembered: true`。最多 200 筆，舊的先刪。
 
 ### VIGI OpenAPI 與車牌辨識
 

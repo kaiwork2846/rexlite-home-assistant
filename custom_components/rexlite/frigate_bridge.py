@@ -37,8 +37,11 @@ only gives an ffmpeg process its recording output when recording was enabled
 at start (``frigate/config/camera/camera.py``), so that one restarts Frigate.
 
 Camera credentials are written into the Frigate configuration on this hub
-(that is where Frigate needs them) and nowhere else: not into HA storage, job
-records, results or error messages.
+(that is where Frigate needs them) and remembered in this hub's private HA
+storage (``.storage/rexlite.frigate``, owner-only), keyed by the camera's MAC:
+a camera the hub activated, added or removed is found, probed and added again
+without typing its password. They never appear in job records, results or
+error messages; only ``vigi_password`` shows one, to an admin who asks.
 
 TP-Link VIGI / InSight cameras also get their own settings through the
 vendor's OpenAPI (``vigi_openapi``): day/night, encoding, microSD status and,
@@ -122,6 +125,8 @@ _CAMERA = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 # Labels of Frigate's default COCO model an installer can choose to track.
 TRACKABLE_OBJECTS = ("person", "car", "motorcycle", "bicycle", "dog", "cat")
 MAX_RETAIN_DAYS = 365
+# Remembered camera passwords kept per hub (oldest go first).
+MAX_CREDENTIALS = 200
 
 
 class FrigateError(Exception):
@@ -562,6 +567,7 @@ class FrigateBridge:
         plate_store: Any = None,
         fire_event: Callable[[dict], None] | None = None,
         http_port: Callable[[], int] | None = None,
+        arp_table: Callable[[], Any] | None = None,
     ) -> None:
         self.store = store
         self.session = session
@@ -596,6 +602,9 @@ class FrigateBridge:
         # Alarm Server packets name no camera: the sender's IP does.
         self.host_cameras: dict[str, tuple[str, str]] = {}
         self.host_cameras_at = -1e9
+        # Camera IP → MAC, from discovery and the hub's ARP table.
+        self.arp_table = arp_table
+        self.macs: dict[str, str] = {}
 
     # Storage ---------------------------------------------------------------
 
@@ -606,6 +615,7 @@ class FrigateBridge:
         self.data = {
             "managed": dict(stored.get("managed") or {}),
             "jobs": list(stored.get("jobs") or [])[-10:],
+            "credentials": dict(stored.get("credentials") or {}),
         }
         for job in self.data["jobs"]:
             if job.get("state") == "running":
@@ -738,6 +748,18 @@ class FrigateBridge:
             camera["uninitialized"] = False
         for camera, state in zip(fresh, states, strict=True):
             camera["uninitialized"] = state == "uninitialized"
+        table = await self._arp()
+        for camera in cameras:
+            mac = normalize_mac(camera.get("mac")) or table.get(camera["host"], "")
+            if mac:
+                self.macs[camera["host"]] = mac
+                camera["mac"] = mac_label(mac)
+            # A camera the hub knows the password of is added without typing it.
+            camera["remembered"] = bool(
+                not camera["configured"]
+                and not camera["uninitialized"]
+                and self._remembered(camera["host"], mac)
+            )
         return {
             "cameras": cameras,
             "durationMs": int((time.monotonic() - started) * 1000),
@@ -802,6 +824,15 @@ class FrigateBridge:
                 manual = stream_uri(bare, host)
         except CameraError as err:
             raise FrigateError(err.code, err.message) from None
+        remembered = False
+        if not username and not password and not manual:
+            known = await self.remembered(host)
+            if known:
+                username, password, remembered = (
+                    known["username"],
+                    known["password"],
+                    True,
+                )
         vendor = vendor_of(msg.get("hint"))
         device: dict[str, str] = {}
         onvif: dict[str, Any] = {"ok": False}
@@ -852,6 +883,8 @@ class FrigateBridge:
             "existing": configured.get(host),
             "suggestedName": (device.get("model") or msg.get("hint") or "")[:60],
             "hints": _hints(vendor, onvif, streams),
+            # Probed with the password this hub remembered; add needs none.
+            "remembered": remembered,
         }
 
     async def _raise_if_uninitialized(self, host: str) -> None:
@@ -861,16 +894,20 @@ class FrigateBridge:
     async def activate(self, msg: dict) -> dict:
         """Activate a factory-fresh VIGI camera with the installer's password."""
 
+        password = str(msg.get("password") or "")
         try:
-            return await vigi_activate(
+            result = await vigi_activate(
                 self.session,
                 msg.get("host"),
-                str(msg.get("password") or ""),
+                password,
                 onvif_port=camera_port(msg.get("port"), 80),
                 time_zone=self.time_zone(),
             )
         except CameraError as err:
             raise FrigateError(err.code, err.message) from None
+        # The password the platform generated: remembered for every later step.
+        await self.remember(result["host"], result["username"], password, "activate")
+        return {**result, "remembered": True}
 
     async def _check(
         self, candidates: list[dict], username: str, password: str
@@ -949,6 +986,104 @@ class FrigateBridge:
                 stream["height"] = stream.get("height") or info.get("height")
                 stream["codec"] = stream.get("codec") or info.get("codec") or ""
 
+    # Remembered credentials ---------------------------------------------------
+
+    async def _arp(self) -> dict[str, str]:
+        if self.arp_table is None:
+            return {}
+        with contextlib.suppress(Exception):
+            table = self.arp_table()
+            if hasattr(table, "__await__"):
+                table = await table
+            return {str(k): normalize_mac(v) for k, v in dict(table or {}).items()}
+        return {}
+
+    async def _mac(self, host: str) -> str:
+        if host not in self.macs:
+            mac = (await self._arp()).get(host, "")
+            if mac:
+                self.macs[host] = mac
+        return self.macs.get(host, "")
+
+    def _remembered(self, host: str, mac: str) -> dict | None:
+        entries = self.data.get("credentials") or {}
+        if mac:
+            for entry in entries.values():
+                if entry.get("mac") == mac:
+                    return entry
+        for entry in entries.values():
+            # A host match only counts when no MAC says it is another camera.
+            if entry.get("host") == host and not (
+                mac and entry.get("mac") and entry["mac"] != mac
+            ):
+                return entry
+        return None
+
+    async def remembered(self, host: str) -> dict | None:
+        """The password this hub remembers for the camera at ``host``."""
+
+        await self.load()
+        return self._remembered(host, await self._mac(host))
+
+    async def remember(
+        self, host: str, username: str, password: str, source: str
+    ) -> None:
+        if not password:
+            return
+        await self.load()
+        mac = await self._mac(host)
+        entries = {
+            key: entry
+            for key, entry in (self.data.get("credentials") or {}).items()
+            if entry.get("host") != host and not (mac and entry.get("mac") == mac)
+        }
+        entries[mac or f"host:{host}"] = {
+            "host": host,
+            "mac": mac or None,
+            "username": username or "admin",
+            "password": password,
+            "source": source,
+            "at": _now(),
+        }
+        newest = sorted(entries.items(), key=lambda item: item[1]["at"])
+        self.data["credentials"] = dict(newest[-MAX_CREDENTIALS:])
+        await self._save()
+
+    async def vigi_password(self, msg: dict) -> dict:
+        """A camera's password for an admin who asks (to sign in on its web page)."""
+
+        await self.load()
+        camera = str(msg.get("camera") or "")
+        if camera:
+            if not _CAMERA.match(camera):
+                raise FrigateError("frigate_invalid_request", "攝影機名稱不正確")
+            access = camera_access(await (await self.api()).raw_config(), camera)
+            host = access["host"]
+        else:
+            host, access = camera_host(msg.get("host")), None
+        known = await self.remembered(host)
+        if known:
+            username, password = known["username"], known["password"]
+            source, at = known.get("source"), known.get("at")
+        elif access:
+            username, password, source, at = (
+                access["username"],
+                access["password"],
+                "frigate",
+                None,
+            )
+        else:
+            raise FrigateError(
+                "camera_credentials_missing", "主機沒有記住這台攝影機的密碼"
+            )
+        return {
+            "host": host,
+            "username": username,
+            "password": password,
+            "source": source,
+            "at": at,
+        }
+
     # Jobs -----------------------------------------------------------------------
 
     def job(self, job_id: str) -> dict:
@@ -963,6 +1098,15 @@ class FrigateBridge:
 
     async def start_add(self, msg: dict) -> dict:
         await self.load()
+        if not msg.get("username") and not msg.get("password"):
+            with contextlib.suppress(CameraError):
+                known = await self.remembered(camera_host(msg.get("host")))
+                if known:
+                    msg = {
+                        **msg,
+                        "username": known["username"],
+                        "password": known["password"],
+                    }
         request = self._add_request(msg)
         return self._start(
             "add",
@@ -1220,6 +1364,8 @@ class FrigateBridge:
             "operationId": job["jobId"],
         }
         await self._save()
+        if request["password"]:
+            await self.remember(host, request["username"], request["password"], "add")
         return {
             "camera": key,
             "label": request["label"],
@@ -1332,6 +1478,12 @@ class FrigateBridge:
             )
             if name in streams and name not in others
         ]
+        # Kept for a later re-add: removing a camera does not forget its password.
+        with contextlib.suppress(FrigateError, CameraError):
+            access = camera_access(await api.raw_config(), camera)
+            await self.remember(
+                access["host"], access["username"], access["password"], "frigate"
+            )
         job.update(stage="configure", message="更新 Frigate 設定")
         restarted = await self._take_out(job, api, camera, owned)
         self.data["managed"].pop(camera, None)
@@ -1741,6 +1893,31 @@ def cameras_by_host(raw: str) -> dict[str, tuple[str, str]]:
     return found
 
 
+def normalize_mac(value: Any) -> str:
+    """``6c:4c:bc:aa:c9:5e`` / ``6C-4C-…`` → ``6C4CBCAAC95E``; empty if not a MAC."""
+
+    text = re.sub(r"[^0-9A-F]", "", str(value or "").upper())
+    return text if len(text) == 12 and text != "0" * 12 else ""
+
+
+def mac_label(mac: str) -> str:
+    return ":".join(mac[i : i + 2] for i in range(0, 12, 2)) if mac else ""
+
+
+def read_arp(path: str = "/proc/net/arp") -> dict[str, str]:
+    """The hub's ARP table (IP → MAC): Linux, host network, so cameras show up."""
+
+    table: dict[str, str] = {}
+    with contextlib.suppress(OSError), open(path, encoding="ascii") as handle:
+        for line in handle.read().splitlines()[1:]:
+            fields = line.split()
+            if len(fields) >= 4 and fields[2] != "0x0":
+                mac = normalize_mac(fields[3])
+                if mac:
+                    table[fields[0]] = mac
+    return table
+
+
 def nearest_address(addresses: list[str], host: str) -> str | None:
     """The hub address the camera reaches most directly: same /24, then /16."""
 
@@ -1932,6 +2109,7 @@ def register_frigate_bridge(hass: Any) -> FrigateBridge:
         http_port=lambda: int(
             getattr(getattr(hass, "http", None), "server_port", None) or 8123
         ),
+        arp_table=lambda: hass.async_add_executor_job(read_arp),
     )
 
     def handler(name: str, schema: dict, run: Callable):
@@ -1992,7 +2170,7 @@ def register_frigate_bridge(hass: Any) -> FrigateBridge:
             {
                 vol.Required("host"): host,
                 vol.Optional("port"): port,
-                vol.Required("password"): vol.All(str, vol.Length(min=9, max=32)),
+                vol.Required("password"): vol.All(str, vol.Length(min=10, max=32)),
             },
             bridge.activate,
         ),
@@ -2157,6 +2335,14 @@ def register_frigate_bridge(hass: Any) -> FrigateBridge:
                 ),
             },
             bridge.lpr_image,
+        ),
+        handler(
+            "vigi_password",
+            {
+                vol.Exclusive("camera", "target"): camera,
+                vol.Exclusive("host", "target"): host,
+            },
+            bridge.vigi_password,
         ),
         handler(
             "lpr_list",

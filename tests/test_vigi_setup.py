@@ -10,7 +10,7 @@ import types
 import unittest
 from datetime import UTC, datetime
 from pathlib import Path
-from urllib.parse import unquote, urlsplit
+from urllib.parse import quote, unquote, urlsplit
 
 PACKAGE = Path(__file__).parents[1] / "custom_components/rexlite"
 package = types.ModuleType("rexlite_vigi_setup_tests")
@@ -49,6 +49,31 @@ SOAP = (
 )
 
 
+def _der(tag: int, body: bytes) -> bytes:
+    if len(body) < 128:
+        return bytes([tag, len(body)]) + body
+    size = (len(body).bit_length() + 7) // 8
+    return bytes([tag, 0x80 | size]) + len(body).to_bytes(size, "big") + body
+
+
+def _integer(value: int) -> bytes:
+    data = value.to_bytes((value.bit_length() + 8) // 8, "big")
+    return _der(0x02, data)
+
+
+# The test key as OpenAPI hands it out: base64 SubjectPublicKeyInfo, URL-encoded.
+SPKI = quote(
+    base64.b64encode(
+        _der(
+            0x30,
+            _der(0x30, bytes.fromhex("06092a864886f70d0101010500"))
+            + _der(0x03, b"\x00" + _der(0x30, _integer(N) + _integer(65537))),
+        )
+    ).decode(),
+    safe="",
+)
+
+
 def decrypt(value: str) -> str:
     block = pow(int.from_bytes(base64.b64decode(unquote(value)), "big"), D, N)
     data = block.to_bytes(128, "big")
@@ -75,9 +100,14 @@ class Response:
 class Camera:
     """The camera's anonymous web API (HTTPS) and ONVIF device service."""
 
-    def __init__(self, initialized: bool = False, vigi: bool = True):
+    def __init__(
+        self, initialized: bool = False, vigi: bool = True, openapi: bool = False
+    ):
         self.initialized = initialized
         self.vigi = vigi
+        # InSight-style: the documented OpenAPI initialisation on /openapi/initialize.
+        self.openapi = openapi
+        self.method = ""
         self.password = ""
         self.received: dict = {}
         self.clock: str = ""
@@ -90,6 +120,12 @@ class Camera:
             if self.drops:
                 self.drops -= 1
                 raise OSError("connection reset")
+            if parts.path == "/openapi/initialize":
+                if not self.openapi:
+                    return Response(404, b"<html>404</html>")
+                return Response(
+                    200, json.dumps(self.init(json.loads(kwargs["data"]))).encode()
+                )
             if not self.vigi:
                 return Response(200, b"<html></html>")
             return Response(
@@ -110,6 +146,21 @@ class Camera:
         return Response(404, b"")
 
     request = request_
+
+    def init(self, body: dict) -> dict:
+        if self.initialized:
+            return {"method": body["method"], "error_code": -10002}
+        if body["method"] == "getEncrptInfo":
+            return {
+                "method": "getEncryptInfo",
+                "result": {"encryptInfo": {"rsakey": SPKI}},
+                "error_code": 0,
+            }
+        if body["method"] == "setPassword":
+            self.password = decrypt(body["params"]["encrypted_password"])
+            self.initialized, self.method = True, "openapi"
+            return {"method": "setPassword", "error_code": 0}
+        return {"method": body["method"], "error_code": -10003}
 
     def web(self, body: dict) -> dict:
         if "user_management" in body:
@@ -150,7 +201,13 @@ class VigiSetupTests(unittest.IsolatedAsyncioTestCase):
         result = await m.vigi_activate(camera, HOST, PASSWORD, time_zone="Asia/Taipei")
         self.assertEqual(
             result,
-            {"host": HOST, "username": "admin", "activated": True, "clock": True},
+            {
+                "host": HOST,
+                "username": "admin",
+                "activated": True,
+                "clock": True,
+                "method": "web",
+            },
         )
         self.assertEqual(camera.password, PASSWORD)
         self.assertEqual(camera.received["username"], "admin")
@@ -163,6 +220,41 @@ class VigiSetupTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(PASSWORD, json.dumps(camera.received))
         self.assertIn("<tt:TZ>UTC-8</tt:TZ>", camera.clock)
         self.assertNotIn(PASSWORD, json.dumps(result))
+
+    async def test_openapi_initialisation_with_the_camera_key(self):
+        # An InSight camera: its web API says nothing either way, OpenAPI does.
+        camera = Camera(vigi=False, openapi=True)
+        self.assertEqual(await m.vigi_state(camera, HOST), "uninitialized")
+        result = await m.vigi_activate(camera, HOST, PASSWORD, time_zone="Asia/Taipei")
+        self.assertEqual((result["method"], result["clock"]), ("openapi", True))
+        self.assertEqual((camera.password, camera.method), (PASSWORD, "openapi"))
+        self.assertIn("<tt:TZ>UTC-8</tt:TZ>", camera.clock)
+        # Once it has a password the initialisation is closed.
+        self.assertIsNone(await m.vigi_state(camera, HOST))
+
+    async def test_web_activation_when_openapi_refuses(self):
+        camera = Camera(openapi=True)
+        camera.init = lambda body: (
+            {
+                "method": body["method"],
+                "error_code": 0,
+                "result": {"encryptInfo": {"rsakey": SPKI}},
+            }
+            if body["method"] == "getEncrptInfo"
+            else {"method": "setPassword", "error_code": -10010}
+        )
+        result = await m.vigi_activate(camera, HOST, PASSWORD)
+        self.assertEqual(result["method"], "web")
+        self.assertEqual(camera.password, PASSWORD)
+
+    def test_public_key(self):
+        self.assertEqual(m.public_key(SPKI), (N, 65537))
+        self.assertEqual(
+            m.public_key(unquote(SPKI)[:40] + "\n" + unquote(SPKI)[40:]), (N, 65537)
+        )
+        for bad in ("", "bm90IGEga2V5", "%%%"):
+            with self.subTest(bad), self.assertRaises(m.CameraError):
+                m.public_key(bad)
 
     async def test_active_and_unknown_cameras_are_refused(self):
         with self.assertRaises(m.CameraError) as caught:
@@ -177,6 +269,8 @@ class VigiSetupTests(unittest.IsolatedAsyncioTestCase):
         for weak in (
             "Aa123456789",
             "short1!A",
+            "Ab1!cD2#e",
+            "Xaab!9y8z7Q1",
             "Xabc!9y8z7Q",
             "Xaaa!9y8z7Q",
             "Q!x9y789zW",

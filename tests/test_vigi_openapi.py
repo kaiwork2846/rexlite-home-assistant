@@ -620,3 +620,122 @@ class BridgeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RememberedTests(unittest.TestCase):
+    """Passwords the hub set or used are remembered by MAC and filled in."""
+
+    def bridge(self, arp: dict, store=None):
+        bridge = bridge_module.FrigateBridge(
+            store=store or Store(),
+            session=Camera(),
+            create_task=lambda coro, name: asyncio.ensure_future(coro),
+            candidates=("http://127.0.0.1:5050",),
+            plate_store=Store(),
+            arp_table=lambda: arp,
+        )
+        return bridge
+
+    def test_by_mac_across_an_address_change(self) -> None:
+        arp = {"192.168.2.180": "6c:4c:bc:aa:c9:5e"}
+        store = Store()
+        bridge = self.bridge(arp, store)
+
+        async def scenario():
+            await bridge.remember("192.168.2.180", "admin", "Rex-Cam7Kp9x", "activate")
+            # DHCP moved the camera; another camera took the old address.
+            arp.clear()
+            arp.update(
+                {
+                    "192.168.2.181": "6C-4C-BC-AA-C9-5E",
+                    "192.168.2.180": "00:11:22:33:44:55",
+                }
+            )
+            bridge.macs.clear()
+            return (
+                await bridge.remembered("192.168.2.181"),
+                await bridge.remembered("192.168.2.180"),
+            )
+
+        moved, other = run(scenario())
+        self.assertEqual(moved["password"], "Rex-Cam7Kp9x")
+        self.assertEqual(moved["mac"], "6C4CBCAAC95E")
+        self.assertIsNone(other)
+        self.assertEqual(list(store.data["credentials"]), ["6C4CBCAAC95E"])
+
+    def test_activation_and_add_remember_and_fill_in(self) -> None:
+        bridge = self.bridge({"192.168.2.180": "6c:4c:bc:aa:c9:5e"})
+        requests: list[dict] = []
+        original = bridge._add_request
+
+        def capture(msg):
+            request = original(msg)
+            requests.append(request)
+            return request
+
+        async def activate(session, host, password, **kwargs):
+            return {
+                "host": host,
+                "username": "admin",
+                "activated": True,
+                "clock": True,
+                "method": "openapi",
+            }
+
+        bridge._add_request = capture
+        bridge._start = lambda kind, operation, fields, run: {"jobId": operation}
+        saved = bridge_module.vigi_activate
+        bridge_module.vigi_activate = activate
+        try:
+            activated = run(
+                bridge.activate({"host": "192.168.2.180", "password": "Rex-Cam7Kp9x"})
+            )
+            run(
+                bridge.start_add(
+                    {
+                        "operationId": "3f2a3c8e-5d1b-4a8e-9c3d-2b1a0f9e8d7c",
+                        "name": "InSight-LPR345Z",
+                        "host": "192.168.2.180",
+                        "main": "rtsp://192.168.2.180:554/stream1",
+                    }
+                )
+            )
+        finally:
+            bridge_module.vigi_activate = saved
+        self.assertTrue(activated["remembered"])
+        self.assertNotIn("Rex-Cam7Kp9x", json.dumps(activated))
+        self.assertEqual(
+            (requests[0]["username"], requests[0]["password"]),
+            ("admin", "Rex-Cam7Kp9x"),
+        )
+
+    def test_password_for_an_admin(self) -> None:
+        bridge = self.bridge({})
+        # Not remembered: Frigate's own config still has it.
+        shown = run(bridge.vigi_password({"camera": CAMERA}))
+        self.assertEqual(
+            (shown["host"], shown["password"], shown["source"]),
+            (HOST, PASSWORD, "frigate"),
+        )
+        run(bridge.remember("192.168.2.99", "admin", "Other#Pass12", "add"))
+        self.assertEqual(
+            run(bridge.vigi_password({"host": "192.168.2.99"}))["password"],
+            "Other#Pass12",
+        )
+        with self.assertRaises(bridge_module.FrigateError):
+            run(bridge.vigi_password({"host": "192.168.2.98"}))
+
+    def test_arp_table(self) -> None:
+        import tempfile
+
+        with tempfile.NamedTemporaryFile("w", suffix=".arp", delete=False) as handle:
+            handle.write(
+                "IP address  HW type  Flags  HW address         Mask  Device\n"
+                "192.168.2.180  0x1  0x2  6c:4c:bc:aa:c9:5e  *  eth0\n"
+                "192.168.2.50  0x1  0x0  00:00:00:00:00:00  *  eth0\n"
+            )
+        table = bridge_module.read_arp(handle.name)
+        Path(handle.name).unlink()
+        self.assertEqual(table, {"192.168.2.180": "6C4CBCAAC95E"})
+        self.assertEqual(bridge_module.read_arp("/no/such/file"), {})
+        self.assertEqual(bridge_module.mac_label("6C4CBCAAC95E"), "6C:4C:BC:AA:C9:5E")
