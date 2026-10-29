@@ -37,6 +37,7 @@ from zoneinfo import ZoneInfo
 
 from .camera_probe import CameraError, _timeout, camera_host
 from .lpr_gate import normalize_plate
+from .vigi_openapi import plate_record
 from .vigi_setup import UNINITIALIZED, USERNAME, encrypt, public_key
 
 WEB_PORT = 443
@@ -541,6 +542,87 @@ class VigiWeb:
         if changed:
             # Like the camera's page: every row in one request.
             await self.request("set", {"lpr": rows})
+
+    async def open_gate(self) -> None:
+        """Pulse the gate relay, like the page's manual alarm output."""
+
+        await self.request(
+            "do", {"alarm_output": {"lpr_manual_alarm": {"output_dev": 1}}}
+        )
+
+    # Recognition trigger and records (what OpenAPI offers, without it) ----------
+
+    async def set_trigger(self, video: bool, alarm: bool) -> None:
+        """Recognise on the picture (``reg_video``) and/or the alarm input."""
+
+        reply = await self.request(
+            "get", {"license_plate_recognition": {"name": "lpr_para"}}
+        )
+        para = (reply.get("license_plate_recognition") or {}).get("lpr_para") or {}
+        kept = {
+            key: para[key]
+            for key in ("same_tri_interval", "reg_no_plate")
+            if key in para
+        }
+        await self.request(
+            "set",
+            {
+                "license_plate_recognition": {
+                    "lpr_para": {**kept, "reg_video": "on" if video else "off"}
+                }
+            },
+        )
+        await self.request(
+            "set",
+            {
+                "alarm_input": {
+                    "notify_list_AI1": {"lpss_enabled": "on" if alarm else "off"}
+                }
+            },
+        )
+
+    async def plate_records(
+        self, start: int, end: int, page: int, per_page: int, plate: str = ""
+    ) -> dict:
+        """The camera's own plate records, as the page's 車牌查詢 reads them."""
+
+        user = await self.request("do", {"system": {"get_user_id": None}})
+        user_id = _int(user.get("user_id"))
+        if user_id is None:
+            raise CameraError("camera_web_failed", "攝影機沒有回傳查詢編號")
+        reply = await self.request(
+            "do",
+            {
+                "license_plate_recognition": {
+                    "search_license_plate": {
+                        "end_time": int(end),
+                        "start_time": int(start),
+                        "user_id": user_id,
+                        "item_per_page": int(per_page),
+                        "page_num": int(page),
+                        "license_plate_number": plate,
+                    }
+                }
+            },
+            seconds=15,
+        )
+        rows = reply.get("license_plate_result")
+        records = []
+        for item in rows if isinstance(rows, list) else []:
+            row = _row(item, "license_plate_number")
+            # The page decodes the plate; OpenAPI rows are parsed the same way.
+            decoded = {
+                **row,
+                "license_plate_number": _text(row.get("license_plate_number")),
+            }
+            record = plate_record(decoded)
+            if record:
+                records.append(record)
+        return {
+            "total": _int(reply.get("total")) or 0,
+            "page": _int(reply.get("page")) or int(page),
+            "records": records,
+        }
 
     # Allow / block list ---------------------------------------------------------
 

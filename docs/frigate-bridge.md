@@ -102,7 +102,11 @@ OpenAPI 的開關、車牌辨識、Alarm Server、攝影機內建白／黑名單
 5. 開閘連動：`lpr.device_linkage_info`（觸發 0 車牌／1 警報輸入 × 判定 1 白名單、2 黑名單、3 臨時車、4 無牌）。開啟自動開閘時只有「車牌 × 白名單」輸出繼電器，其他全部關閉；關閉時只關「車牌 × 白名單」。之前沒關過自動開閘的攝影機預設開啟。
 6. 名單：`lpr.get_whitelist`（`list_type` 2 白名單、1 黑名單；0 臨時名單不動）。第一次設定先把攝影機上平台沒有的車牌併入平台名單（安裝人員在攝影機上輸入的不會遺失），之後平台為準：每次 `lpr_list_save` 在背景把差異寫到攝影機（`del_whitelist` 每次 50 筆、`mod_whitelist`、`add_whitelist`），新的儲存會取消進行中的同步重新比對；進度在 `listSync`（`running`／`ok`／`failed`、total、added、updated、removed）。有效日轉為中樞時區的當日 00:00:00–23:59:59（沒填為 2000-01-01 到 2037-12-31，攝影機網頁的範圍），名稱寫入備註（最多 16 字）。
 
-每一步各自回報 `ok`／`failed`（名單有差異要寫時為 `running`），登入失敗即停止、不做任何變更。尚未以 LPR345Z 實機驗證；失敗的步驟仍可到攝影機網頁手動設定。
+每一步各自回報 `ok`／`failed`（名單有差異要寫時為 `running`），登入失敗即停止、不做任何變更。OpenAPI 開啟後最多等約 30 秒；仍連不上時讀回開關，訊息分辨「攝影機沒有套用 OpenAPI 開關」或「已開啟但連不上（原因）」。
+
+2026-10-29 科盛 InSight LPR345Z 實機：網頁 API 登入、車牌辨識、Alarm Server、開閘連動、名單同步皆成功；OpenAPI 開啟後 8 秒內仍連不上（0.1.41）。
+
+OpenAPI 連不上時（`camera_openapi_off`／`camera_openapi_tls`／`camera_unreachable`），一鍵設定過的攝影機（`setupAt`）改走網頁 API：開閘 `{"method":"do","alarm_output":{"lpr_manual_alarm":{"output_dev":1}}}`、辨識觸發 `license_plate_recognition.lpr_para.reg_video` 與 `alarm_input.notify_list_AI1.lpss_enabled`、車牌紀錄 `system.get_user_id` + `license_plate_recognition.search_license_plate`（回應格式與 OpenAPI `searchLprInfo` 相同）。車牌圖片在攝影機網頁是另一條媒體串流，仍只走 OpenAPI。`vigi_info.web` 表示可以改走網頁 API。
 
 ### configure（攝影機設定）
 
@@ -124,4 +128,4 @@ Frigate 0.16–0.17（含 0.17.1）的即時新增／移除不可靠，已以 Fr
 
 ## 錯誤碼
 
-`message` 為可直接顯示的繁體中文。`camera_*`：`camera_invalid_request`、`camera_unreachable`、`camera_auth_failed`、`camera_uninitialized`、`camera_weak_password`、`camera_not_vigi`、`camera_already_active`、`camera_activate_failed`、`camera_onvif_failed`、`camera_stream_not_found`、`camera_rtsp_failed`、`camera_discovery_failed`、`camera_openapi_off`、`camera_openapi_failed`、`camera_not_supported`、`camera_no_storage`、`camera_busy`、`camera_locked`、`camera_search_failed`、`camera_web_failed`、`camera_web_unsupported`、`camera_alarm_server_full`、`camera_alarm_server_failed`。`frigate_*`：`frigate_unreachable`、`frigate_unsupported`、`frigate_busy`、`frigate_camera_exists`、`frigate_codec_unsupported`、`frigate_config_rejected`、`frigate_restream_failed`、`frigate_stream_not_running`、`frigate_camera_not_found`、`frigate_job_not_found`、`frigate_snapshot_failed`、`frigate_interrupted`、`frigate_failed`。
+`message` 為可直接顯示的繁體中文。`camera_*`：`camera_invalid_request`、`camera_unreachable`、`camera_auth_failed`、`camera_uninitialized`、`camera_weak_password`、`camera_not_vigi`、`camera_already_active`、`camera_activate_failed`、`camera_onvif_failed`、`camera_stream_not_found`、`camera_rtsp_failed`、`camera_discovery_failed`、`camera_openapi_off`、`camera_openapi_failed`、`camera_not_supported`、`camera_no_storage`、`camera_busy`、`camera_locked`、`camera_search_failed`、`camera_web_failed`、`camera_web_unsupported`、`camera_alarm_server_full`、`camera_alarm_server_failed`、`camera_openapi_tls`。`frigate_*`：`frigate_unreachable`、`frigate_unsupported`、`frigate_busy`、`frigate_camera_exists`、`frigate_codec_unsupported`、`frigate_config_rejected`、`frigate_restream_failed`、`frigate_stream_not_running`、`frigate_camera_not_found`、`frigate_job_not_found`、`frigate_snapshot_failed`、`frigate_interrupted`、`frigate_failed`。

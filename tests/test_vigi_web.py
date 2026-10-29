@@ -28,6 +28,7 @@ CameraError = sys.modules[f"{package.__name__}.camera_probe"].CameraError
 ZONE = web_module.zone_of("Asia/Taipei")
 NONCE = "CgDgvECK"
 STOK = "uc5!PvP0aA!Cw*v(W"
+STUCK = "已開啟但連不上（20443 埠拒絕連線），紀錄與開閘改走攝影機網頁"
 
 
 def stamp(text: str) -> int:
@@ -38,9 +39,16 @@ class WebCamera(Camera):
     """Frigate and OpenAPI from ``Camera``, plus the camera's web page API on 443
     (requests and replies as in TP-Link's InSight LPR345Z web emulator)."""
 
-    def __init__(self, *, model: str = "InSight%20LPR345Z", **kwargs) -> None:
+    def __init__(
+        self, *, model: str = "InSight%20LPR345Z", openapi_starts: bool = True, **kwargs
+    ) -> None:
         super().__init__(openapi=False, **kwargs)
         self.model = model
+        # The switch on the camera's page; OpenAPI itself may still not answer.
+        self.openapi_switch = False
+        self.openapi_starts = openapi_starts
+        self.web_gate = 0
+        self.alarm_in = "off"
         self.web_logins = 0
         self.stale_once = False
         self.ds: list[dict] = []
@@ -159,16 +167,27 @@ class WebCamera(Camera):
                 },
                 "error_code": 0,
             }
+        if "alarm_output" in body:
+            assert body["alarm_output"] == {"lpr_manual_alarm": {"output_dev": 1}}
+            self.web_gate += 1
+            return {"error_code": 0}
+        if "system" in body:
+            assert body == {"method": "do", "system": {"get_user_id": None}}
+            return {"user_id": 12, "error_code": 0}
+        if "alarm_input" in body:
+            self.alarm_in = body["alarm_input"]["notify_list_AI1"]["lpss_enabled"]
+            return {"error_code": 0}
         if "openapi" in body:
             if method == "set":
                 assert body["openapi"] == {
                     "server": {"enabled": "on", "openapi_port": "20443"}
                 }
-                self.openapi = True
+                self.openapi_switch = True
+                self.openapi = self.openapi_starts
             return {
                 "openapi": {
                     "server": {
-                        "enabled": "on" if self.openapi else "off",
+                        "enabled": "on" if self.openapi_switch else "off",
                         "openapi_port": "20443",
                     }
                 },
@@ -176,6 +195,20 @@ class WebCamera(Camera):
             }
         if "license_plate_recognition" in body:
             section = body["license_plate_recognition"]
+            if "search_license_plate" in section:
+                assert section["search_license_plate"]["user_id"] == 12
+                row = {
+                    "snapshot_timestamp": 150,
+                    "license_plate_number": "RFS1515",
+                    "list_type": 2,
+                    "thumbnail_file_id": "0001000150028500",
+                }
+                return {
+                    "total": 1,
+                    "page": 1,
+                    "license_plate_result": [{"license_plate_results_0": row}],
+                    "error_code": 0,
+                }
             if method == "set":
                 self.lpr_para.update(section.get("lpr_para") or {})
                 self.lpss_rule.update(section.get("lpss_rule") or {})
@@ -551,6 +584,66 @@ class SetupTests(unittest.TestCase):
         )
         self.assertIn("密碼", result["steps"][0]["message"])
         self.assertEqual(camera.ds, [])
+
+
+class FallbackTests(unittest.TestCase):
+    """OpenAPI switched on but not answering: the web page API stands in."""
+
+    def test_gate_trigger_and_records_without_openapi(self) -> None:
+        camera = WebCamera(openapi_starts=False)
+        hub = bridge(camera)
+
+        async def scenario():
+            setup = await hub.vigi_setup({"camera": CAMERA})
+            pending = hub.plate_syncs.get(CAMERA)
+            if pending is not None:
+                await pending
+            info = await hub.vigi_info({"camera": CAMERA})
+            await hub.vigi_control({"camera": CAMERA, "op": "gate"})
+            await hub.vigi_control(
+                {"camera": CAMERA, "op": "lpr_trigger", "video": True, "alarm": True}
+            )
+            found = await hub.lpr_records({"camera": CAMERA, "start": 100, "end": 200})
+            return setup, info, found
+
+        setup, info, found = run(scenario())
+        step = next(item for item in setup["steps"] if item["id"] == "openapi")
+        self.assertEqual(step["state"], "failed")
+        self.assertEqual(step["message"], STUCK)
+        self.assertEqual(
+            [item["state"] for item in setup["steps"] if item["id"] != "openapi"],
+            ["ok", "ok", "ok", "ok", "running"],
+        )
+        self.assertEqual(info["openapi"]["state"], "off")
+        self.assertTrue(info["web"])
+        self.assertEqual(camera.web_gate, 1)
+        self.assertEqual((camera.lpr_para["reg_video"], camera.alarm_in), ("on", "on"))
+        self.assertEqual((found["total"], found["records"][0]["plate"]), (1, "RFS1515"))
+        with self.assertRaises(CameraError) as caught:
+            run(hub.lpr_image({"camera": CAMERA, "time": 150, "thumbId": "x"}))
+        self.assertIn("需要攝影機 OpenAPI", caught.exception.message)
+
+    def test_a_camera_never_set_up_still_needs_openapi(self) -> None:
+        camera = WebCamera()
+        with self.assertRaises(CameraError) as caught:
+            run(bridge(camera).vigi_control({"camera": CAMERA, "op": "gate"}))
+        self.assertEqual(caught.exception.code, "camera_openapi_off")
+        self.assertEqual(camera.web_gate, 0)
+
+    def test_a_switch_the_camera_ignores_is_named(self) -> None:
+        camera = WebCamera(openapi_starts=False)
+        original = camera.handle
+
+        def ignore_switch(body):
+            reply = original(body)
+            if "openapi" in body:
+                camera.openapi_switch = False
+            return reply
+
+        camera.handle = ignore_switch
+        result = run(bridge(camera).vigi_setup({"camera": CAMERA}))
+        step = next(item for item in result["steps"] if item["id"] == "openapi")
+        self.assertEqual(step["message"], "攝影機沒有套用 OpenAPI 開關")
 
 
 if __name__ == "__main__":
