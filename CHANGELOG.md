@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.42
+
+- OpenAPI 開不起來時改走攝影機網頁介面：一鍵設定過的攝影機，`vigi_control` 的開閘（`alarm_output.lpr_manual_alarm`）、辨識觸發（`lpr_para.reg_video`、`alarm_input.notify_list_AI1.lpss_enabled`）與 `lpr_records`（`system.get_user_id` + `license_plate_recognition.search_license_plate`）在 OpenAPI 連不上時自動改用攝影機網頁 API；車牌圖片仍需 OpenAPI，連不上時回傳明確原因。`vigi_info` 加上 `web`（可改走網頁介面）。
+- 一鍵設定的 OpenAPI 步驟：開啟後最多等約 30 秒；失敗時讀回攝影機的 OpenAPI 開關，分辨「攝影機沒有套用 OpenAPI 開關」與「已開啟但連不上（20443 埠拒絕連線／沒有回應／加密連線失敗）」。2026-10-29 科盛 InSight LPR345Z 實機：登入、車牌辨識、推送、開閘連動、名單同步皆成功，只有 OpenAPI 開啟後 8 秒內仍連不上。
+- OpenAPI 加密連線失敗另回 `camera_openapi_tls`（附原因），不再一律視為未開啟。
+
 ## 0.1.41
 
 - 新增 `rexlite/frigate/vigi_setup`（admin）：VIGI／InSight 攝影機一鍵設定，不必再登入攝影機網頁。以 Frigate 設定裡的帳密走攝影機網頁本身的 JSON API（`vigi_web`；請求格式取自 TP-Link 公開的 InSight LPR345Z 網頁模擬器，登入方式與 VIGICam 專案的實機記錄一致）：開啟 OpenAPI 並等它回應；LPR 機型再開啟車牌辨識（影像觸發）、把 Alarm Server 指向中樞的 webhook、設定開閘連動（只有白名單車牌輸出繼電器）、合併並同步白／黑名單。每一步各自回報結果，登入失敗不做任何變更。
