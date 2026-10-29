@@ -25,12 +25,13 @@
 | `rexlite/frigate/configure` | `operationId`、`camera`，以及至少一項：`record`、`detect`、`recordDays`、`eventDays`（0–365）、`objects`（`person`、`car`、`motorcycle`、`bicycle`、`dog`、`cat`，至少一項） | 背景工作 |
 | `rexlite/frigate/snapshot` | `camera`、`height`（120–720） | base64 JPEG |
 | `rexlite/frigate/vigi_password` | `camera` 或 `host` | `host`、`username`、`password`、`source`（activate／add／frigate）、`at`；只給管理員查看，例如登入攝影機網頁 |
-| `rexlite/frigate/vigi_info` | `camera` | VIGI OpenAPI：`openapi`（state `ok`／`off`／`auth_failed`／`locked`／`unreachable`／`error`、port、message）、`device`（model、alias、firmware、hardware、mac）、`vigi`、`lpr`、`dayNight`、`video`（main、sub）、`sdCard`（status、total、free、loop）、`plates`（LPR 機型：autoGate、trigger、`alarmServer` 的 host、port、path、protocol、lastContact）；不支援的區段為 `null` |
+| `rexlite/frigate/vigi_info` | `camera` | VIGI OpenAPI：`openapi`（state `ok`／`off`／`auth_failed`／`locked`／`unreachable`／`error`、port、message）、`device`（model、alias、firmware、hardware、mac）、`vigi`、`lpr`、`dayNight`、`video`（main、sub）、`sdCard`（status、total、free、loop）、`plates`（LPR 機型：autoGate、trigger、cameraGate、cameraList、listSync、setupAt、`alarmServer` 的 host、port、path、protocol、lastContact）；不支援的區段為 `null` |
 | `rexlite/frigate/vigi_control` | `camera`、`op`（`gate`、`auto_gate`、`lpr_trigger`、`day_night`、`video_code`），依 op：`enabled`、`video`、`alarm`、`mode`（auto／day／night）、`main`／`sub`（H264、H265、H264+、H265+） | 更新後的區段 |
+| `rexlite/frigate/vigi_setup` | `camera` | 一鍵設定（攝影機網頁 API）：`model`、`lpr`、`steps`（id `login`、`openapi`，LPR 機型再加 `recognition`、`alarm`、`gate`、`list`；state `ok`／`failed`／`running`、message）、`merged`（從攝影機併入平台名單的筆數）、`plates` |
 | `rexlite/frigate/lpr_records` | `camera`、`start`、`end`（Unix 秒，最多 31 天，預設最近 24 小時）、`page`、`perPage`（1–50）、`plate` | `total`、`page`、`records`（time、plate、cameraList、eventType、thumbId、thumbSize、backgroundId、backgroundSize、device） |
 | `rexlite/frigate/lpr_image` | `camera`、`time`、`thumbId`、`backgroundId`、`which`（thumbnail／background／both） | base64 JPEG：`thumbnail`、`background`（沒要求的為 `null`） |
-| `rexlite/frigate/lpr_list` | `limit`（0–200，預設 50） | `entries`、`log`（新到舊）、`cameras`（各攝影機 autoGate、trigger） |
-| `rexlite/frigate/lpr_list_save` | `entries`（plate、kind `allow`／`block`、name、from、until、enabled；最多 2000 筆） | 整理後的 `entries` |
+| `rexlite/frigate/lpr_list` | `limit`（0–200，預設 50） | `entries`、`log`（新到舊）、`cameras`（各攝影機 autoGate、trigger、cameraGate、cameraList、listSync、setupAt） |
+| `rexlite/frigate/lpr_list_save` | `entries`（plate、kind `allow`／`block`、name、from、until、enabled；最多 2000 筆） | 整理後的 `entries`；`syncing`：背景同步到哪些攝影機 |
 
 ### probe
 
@@ -88,7 +89,20 @@ TP-Link 為 VIGI／InSight 攝影機公開的控制介面（「VIGI IPC Open API
 - 認證：`POST https://IP:20443` `{"method":"doAuth","params":null}` 取得 realm／nonce，回應值為 `SHA256(SHA256(admin:realm:password):nonce:SHA256(POST:doAuth))`，第二次 `doAuth` 回 `stok`；之後每個請求 `POST https://IP:20443/stok=<stok>`，每次新連線（`Connection: close`）。`stok` 在中樞保留 10 分鐘，攝影機回 `-10002`／`-10020` 時重新登入一次。
 - 用到的方法：`getDeviceInfo`、`getDayNightMode`／`setDayNightMode`、`getVideoCode`／`setVideoCode`（V1.2 起；舊韌體回 `-10003`，該區段為 `null`）、`getSdCardStatus`、`openBarrierGate`、`lprTriggerMode`（沒有讀取方法，中樞記住平台最後設定的值）、`getUserId` + `searchLprInfo`、`downloadLprImage`。
 - 錯誤碼對應：`-10013` → `camera_no_storage`（沒插 microSD，沒有車牌紀錄）、`-10003`／`-10030` → `camera_not_supported`、`-10020` → `camera_auth_failed`、`-10021`／`-10011`／`-10015` → `camera_busy`、`-10022` → `camera_locked`。
-- 平台名單與自動開閘：攝影機內建的白／黑名單沒有 API，名單存中樞 `.storage/rexlite.lpr`。攝影機「設定 → 事件 → Alarm Server」新增一筆：主機為中樞 IP（與攝影機同網段的那個）、埠為 HA 的 HTTP 埠、URL 為 `/api/webhook/<id>`、HTTP、可不附圖片。攝影機每辨識一次就送 `{"camid","date","plate"}`；中樞依來源 IP 找出 Frigate 裡的攝影機，查名單：白名單且該攝影機開啟自動開閘 → `openBarrierGate`（`opened`／失敗為 `gate_failed`），白名單但未開自動開閘 → `auto_off`，黑名單 → `blocked`，其他 → `none`。來源 IP 不是 Frigate 裡的攝影機時只記錄，不開閘。webhook 只接受區網（`local_only`）的 POST。
+- 平台名單與自動開閘：名單存中樞 `.storage/rexlite.lpr`（OpenAPI 沒有名單方法；一鍵設定後另以攝影機網頁 API 同步一份到攝影機，見下節）。攝影機「設定 → 事件 → Alarm Server」新增一筆（一鍵設定會自動填）：主機為中樞 IP（與攝影機同網段的那個）、埠為 HA 的 HTTP 埠、URL 為 `/api/webhook/<id>`、HTTP、不附圖片。攝影機每辨識一次就送 `{"camid","date","plate"}`；中樞依來源 IP 找出 Frigate 裡的攝影機，查名單：白名單且開啟自動開閘 → 攝影機自己開閘的（`cameraGate`）記 `camera`，否則中樞 `openBarrierGate`（`opened`／失敗為 `gate_failed`）；白名單但未開自動開閘 → `auto_off`，黑名單 → `blocked`，其他 → `none`。攝影機自己開閘時中樞不再送第二次開閘訊號（單鍵式閘門會再關上）。來源 IP 不是 Frigate 裡的攝影機時只記錄，不開閘。webhook 只接受區網（`local_only`）的 POST。
+
+### 一鍵設定（攝影機網頁 API）
+
+OpenAPI 的開關、車牌辨識、Alarm Server、攝影機內建白／黑名單與開閘連動只有攝影機網頁能設定，官方沒有文件。`vigi_web` 走攝影機網頁本身用的 JSON API（請求與回應取自 TP-Link 公開的 InSight LPR345Z 網頁模擬器，韌體 1.0.1 Build 251118；登入方式與 VIGICam 專案在 VIGI C540S／C540V、InSight S245 實機記錄的一致），以 Frigate 設定裡的帳密登入：
+
+1. 登入：`POST https://IP/` `{"method":"do","user_management":{"get_encrypt_info":null}}` 回 `key`／`key_2`（RSA 公鑰）、`nonce`（`error_code` 固定 -40401）；`{"method":"do","login":{"encrypt_type":"2","passwdType":"md5","password":…,"username":"admin","keyType":"1"}}`，`password` 為 `RSA-PKCS1v1.5(MD5("TPCQ75NF2Y:"+密碼).upper()+":"+nonce)` 的 base64、URL 編碼，回 `stok`。之後 `POST https://IP/stok=<stok>/ds`；回 -40401 時重新登入一次。密碼錯誤回剩餘次數（`data.time`），不重試，避免鎖定。
+2. OpenAPI：`{"method":"set","openapi":{"server":{"enabled":"on","openapi_port":"20443"}}}`，再等 OpenAPI 回應（最多約 8 秒）。
+3. 車牌辨識（LPR 機型）：`license_plate_recognition.lpr_para.reg_video` 設 `on`（影像觸發），`lpss_rule.enabled` 為 `off` 時設 `on`。
+4. Alarm Server：`report_event` 的 `report_server_list_1..3`；已有同主機、埠、URL 的保留，同主機、埠但 URL 不同的更新，否則新增到空位（三組都滿回 `camera_alarm_server_full`）。
+5. 開閘連動：`lpr.device_linkage_info`（觸發 0 車牌／1 警報輸入 × 判定 1 白名單、2 黑名單、3 臨時車、4 無牌）。開啟自動開閘時只有「車牌 × 白名單」輸出繼電器，其他全部關閉；關閉時只關「車牌 × 白名單」。之前沒關過自動開閘的攝影機預設開啟。
+6. 名單：`lpr.get_whitelist`（`list_type` 2 白名單、1 黑名單；0 臨時名單不動）。第一次設定先把攝影機上平台沒有的車牌併入平台名單（安裝人員在攝影機上輸入的不會遺失），之後平台為準：每次 `lpr_list_save` 在背景把差異寫到攝影機（`del_whitelist` 每次 50 筆、`mod_whitelist`、`add_whitelist`），新的儲存會取消進行中的同步重新比對；進度在 `listSync`（`running`／`ok`／`failed`、total、added、updated、removed）。有效日轉為中樞時區的當日 00:00:00–23:59:59（沒填為 2000-01-01 到 2037-12-31，攝影機網頁的範圍），名稱寫入備註（最多 16 字）。
+
+每一步各自回報 `ok`／`failed`（名單有差異要寫時為 `running`），登入失敗即停止、不做任何變更。尚未以 LPR345Z 實機驗證；失敗的步驟仍可到攝影機網頁手動設定。
 
 ### configure（攝影機設定）
 
@@ -110,4 +124,4 @@ Frigate 0.16–0.17（含 0.17.1）的即時新增／移除不可靠，已以 Fr
 
 ## 錯誤碼
 
-`message` 為可直接顯示的繁體中文。`camera_*`：`camera_invalid_request`、`camera_unreachable`、`camera_auth_failed`、`camera_uninitialized`、`camera_weak_password`、`camera_not_vigi`、`camera_already_active`、`camera_activate_failed`、`camera_onvif_failed`、`camera_stream_not_found`、`camera_rtsp_failed`、`camera_discovery_failed`、`camera_openapi_off`、`camera_openapi_failed`、`camera_not_supported`、`camera_no_storage`、`camera_busy`、`camera_locked`、`camera_search_failed`。`frigate_*`：`frigate_unreachable`、`frigate_unsupported`、`frigate_busy`、`frigate_camera_exists`、`frigate_codec_unsupported`、`frigate_config_rejected`、`frigate_restream_failed`、`frigate_stream_not_running`、`frigate_camera_not_found`、`frigate_job_not_found`、`frigate_snapshot_failed`、`frigate_interrupted`、`frigate_failed`。
+`message` 為可直接顯示的繁體中文。`camera_*`：`camera_invalid_request`、`camera_unreachable`、`camera_auth_failed`、`camera_uninitialized`、`camera_weak_password`、`camera_not_vigi`、`camera_already_active`、`camera_activate_failed`、`camera_onvif_failed`、`camera_stream_not_found`、`camera_rtsp_failed`、`camera_discovery_failed`、`camera_openapi_off`、`camera_openapi_failed`、`camera_not_supported`、`camera_no_storage`、`camera_busy`、`camera_locked`、`camera_search_failed`、`camera_web_failed`、`camera_web_unsupported`、`camera_alarm_server_full`、`camera_alarm_server_failed`。`frigate_*`：`frigate_unreachable`、`frigate_unsupported`、`frigate_busy`、`frigate_camera_exists`、`frigate_codec_unsupported`、`frigate_config_rejected`、`frigate_restream_failed`、`frigate_stream_not_running`、`frigate_camera_not_found`、`frigate_job_not_found`、`frigate_snapshot_failed`、`frigate_interrupted`、`frigate_failed`。
