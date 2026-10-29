@@ -97,6 +97,7 @@ from .camera_probe import (
 from .lpr_gate import PlateGate, alarm_report, normalize_plate
 from .vigi_openapi import (
     DAY_NIGHT_MODES,
+    DOWN,
     OPENAPI_PORT,
     VIDEO_CODES,
     VigiOpenApi,
@@ -1675,21 +1676,40 @@ class FrigateBridge:
         return access, VigiWeb(self.session, access["host"], access["password"])
 
     async def _openapi_ready(self, camera: str) -> None:
-        """Wait for a just-enabled OpenAPI to answer (the camera starts it anew)."""
+        """Wait (about 30 s) for a just-enabled OpenAPI to answer."""
 
         last: CameraError | None = None
-        for attempt in range(5):
+        for attempt in range(10):
             if attempt:
-                await self.sleep(2)
+                await self.sleep(3)
             try:
                 _access, openapi = await self._openapi(camera)
                 await openapi.device()
                 return
             except CameraError as err:
-                if err.code not in ("camera_openapi_off", "camera_unreachable"):
+                if err.code not in DOWN:
                     raise
                 last = err
         raise last or CameraError("camera_openapi_off", "OpenAPI 沒有回應")
+
+    async def _web_ready(self, camera: str) -> bool:
+        """Set up in one tap: the camera's web page API takes the hub's password,
+        so it stands in when OpenAPI cannot be reached."""
+
+        return bool((await self.plates.cameras()).get(camera, {}).get("setupAt"))
+
+    async def _openapi_or_web(self, camera: str, run: Callable, fallback: Callable):
+        """``run(openapi)``; when OpenAPI is unreachable on a set-up camera,
+        ``fallback(web)`` through the camera's web page API instead."""
+
+        _access, openapi = await self._openapi(camera)
+        try:
+            return await run(openapi)
+        except CameraError as err:
+            if err.code not in DOWN or not await self._web_ready(camera):
+                raise
+        _access, web = await self._web(camera)
+        return await fallback(web)
 
     async def vigi_setup(self, msg: dict) -> dict:
         """One tap for what an installer would otherwise do on the camera's page.
@@ -1737,6 +1757,19 @@ class FrigateBridge:
                 await web.enable_openapi()
                 await self._openapi_ready(camera)
             except CameraError as err:
+                # Name which side failed: the switch, or OpenAPI itself.
+                reason = {
+                    "camera_openapi_off": "20443 埠拒絕連線",
+                    "camera_unreachable": "沒有回應",
+                }.get(err.code, err.message)
+                with contextlib.suppress(CameraError):
+                    if (await web.openapi())["enabled"]:
+                        err = CameraError(
+                            err.code,
+                            f"已開啟但連不上（{reason}），紀錄與開閘改走攝影機網頁",
+                        )
+                    else:
+                        err = CameraError(err.code, "攝影機沒有套用 OpenAPI 開關")
                 step("openapi", err)
             else:
                 step("openapi")
@@ -1907,6 +1940,8 @@ class FrigateBridge:
                 re.search(r"vigi|insight", model, re.IGNORECASE)
             )
             result["lpr"] = "LPR" in model.upper()
+            # Gate, records and trigger work without OpenAPI once set up.
+            result["web"] = await self._web_ready(camera)
             if result["lpr"]:
                 result["plates"] = {
                     **await self.plates.camera_settings(camera),
@@ -1920,7 +1955,9 @@ class FrigateBridge:
             access, openapi = await self._openapi(camera)
             result: dict[str, Any] = {"camera": camera, "op": op}
             if op == "gate":
-                await openapi.open_gate()
+                await self._openapi_or_web(
+                    camera, lambda api: api.open_gate(), lambda web: web.open_gate()
+                )
                 await self.plates.log_manual(camera, access["label"])
             elif op == "auto_gate":
                 enabled = bool(msg.get("enabled"))
@@ -1938,7 +1975,11 @@ class FrigateBridge:
                     raise FrigateError(
                         "frigate_invalid_request", "至少要開啟一種觸發方式"
                     )
-                await openapi.set_lpr_trigger(video, alarm)
+                await self._openapi_or_web(
+                    camera,
+                    lambda api: api.set_lpr_trigger(video, alarm),
+                    lambda web: web.set_trigger(video, alarm),
+                )
                 result["plates"] = await self.plates.set_camera(
                     camera, trigger={"video": video, "alarm": alarm}
                 )
@@ -1963,14 +2004,18 @@ class FrigateBridge:
             raise FrigateError(
                 "frigate_invalid_request", f"查詢區間需在 {MAX_RECORD_DAYS} 天內"
             )
+        query = (
+            start,
+            end,
+            int(msg.get("page") or 1),
+            int(msg.get("perPage") or 20),
+            normalize_plate(msg.get("plate")),
+        )
         async with self.vigi_locks.setdefault(camera, asyncio.Lock()):
-            _access, openapi = await self._openapi(camera)
-            found = await openapi.plate_records(
-                start,
-                end,
-                int(msg.get("page") or 1),
-                int(msg.get("perPage") or 20),
-                normalize_plate(msg.get("plate")),
+            found = await self._openapi_or_web(
+                camera,
+                lambda api: api.plate_records(*query),
+                lambda web: web.plate_records(*query),
             )
         return {"camera": camera, "start": start, "end": end, **found}
 
@@ -1981,9 +2026,17 @@ class FrigateBridge:
         want = str(msg.get("which") or "thumbnail")
         async with self.vigi_locks.setdefault(camera, asyncio.Lock()):
             _access, openapi = await self._openapi(camera)
-            images = await openapi.plate_images(
-                int(msg["time"]), msg.get("thumbId"), msg.get("backgroundId")
-            )
+            try:
+                images = await openapi.plate_images(
+                    int(msg["time"]), msg.get("thumbId"), msg.get("backgroundId")
+                )
+            except CameraError as err:
+                # The web page streams pictures over its own media channel.
+                if err.code in DOWN:
+                    raise CameraError(
+                        err.code, "車牌圖片需要攝影機 OpenAPI（目前連不上）"
+                    ) from err
+                raise
         return {
             "camera": camera,
             "time": int(msg["time"]),

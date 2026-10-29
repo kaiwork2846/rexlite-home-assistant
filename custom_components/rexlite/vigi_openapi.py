@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import ssl
 import time
 from collections.abc import Callable
 from typing import Any
@@ -34,7 +35,9 @@ TOKEN_SECONDS = 600
 DAY_NIGHT_MODES = ("auto", "day", "night")
 # What the camera's encoders take; "+" is TP-Link's smart coding.
 VIDEO_CODES = ("H264", "H265", "H264+", "H265+")
-OFF_MESSAGE = "攝影機未開啟 OpenAPI：請到攝影機網頁「設定 → 網路設定 → OpenAPI」開啟"
+OFF_MESSAGE = "攝影機 OpenAPI 未開啟（20443 埠拒絕連線）"
+# Failures that mean OpenAPI is not reachable, as opposed to a refused request.
+DOWN = ("camera_openapi_off", "camera_openapi_tls", "camera_unreachable")
 
 # Appendix 1 of the OpenAPI document.
 _ERRORS: dict[int, tuple[str, str]] = {
@@ -86,6 +89,20 @@ def error_code(reply: dict) -> int:
                 if isinstance(value, str) and value.lstrip("-").isdigit():
                     return int(value)
     return 0
+
+
+def _tls_failure(err: BaseException) -> bool:
+    """A TLS handshake that failed (as opposed to a closed port)."""
+
+    for item in (err, getattr(err, "os_error", None), err.__cause__):
+        if isinstance(item, ssl.SSLError) or "SSL" in type(item).__name__:
+            return True
+    return False
+
+
+def _reason(err: BaseException) -> str:
+    text = str(getattr(err, "os_error", None) or err).strip()
+    return (text or type(err).__name__)[:120]
 
 
 def openapi_error(code: int) -> CameraError:
@@ -178,6 +195,11 @@ class VigiOpenApi:
                 "camera_unreachable", "攝影機沒有回應，請確認攝影機在線"
             ) from err
         except Exception as err:  # noqa: BLE001 - a refused port means OpenAPI is off
+            if _tls_failure(err):
+                raise CameraError(
+                    "camera_openapi_tls",
+                    f"攝影機 OpenAPI 加密連線失敗（{_reason(err)}）",
+                ) from err
             raise CameraError("camera_openapi_off", OFF_MESSAGE) from err
         try:
             reply = json.loads(data)
