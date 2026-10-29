@@ -49,6 +49,12 @@ on license plate models, the barrier gate, the trigger mode and the plate
 records. The platform's plate list and the automatic gate live in
 ``lpr_gate``; plates arrive through a LAN-only webhook the camera's Alarm
 Server posts to.
+
+What only the camera's own web page can set (``vigi_web``) is done in one tap
+(``vigi_setup``): OpenAPI on, and on license plate models recognition on, the
+Alarm Server pointed at this hub, the gate opened by the camera itself for an
+allowed plate, and the camera's allow / block list merged with the platform's.
+From then on every saved list is copied to the camera in the background.
 """
 
 from __future__ import annotations
@@ -96,6 +102,7 @@ from .vigi_openapi import (
     VigiOpenApi,
 )
 from .vigi_setup import vigi_activate, vigi_state
+from .vigi_web import VigiWeb, merge_rows, plan_sync, zone_of
 
 DATA_KEY = "rexlite_frigate"
 STORE_KEY = "rexlite.frigate"
@@ -593,6 +600,10 @@ class FrigateBridge:
         # queue on their own lock, so a slow camera never holds up ONVIF.
         self.vigi_tokens: dict[str, tuple[str, float]] = {}
         self.vigi_locks: dict[str, asyncio.Lock] = {}
+        # The camera's web page API: one session per camera at a time; a
+        # background copy of the plate list per camera, restarted on each save.
+        self.web_locks: dict[str, asyncio.Lock] = {}
+        self.plate_syncs: dict[str, Any] = {}
         self.http_port = http_port or (lambda: 8123)
         self.plates = PlateGate(
             plate_store if plate_store is not None else _MemoryStore(),
@@ -1655,6 +1666,176 @@ class FrigateBridge:
         _access, openapi = await self._openapi(camera)
         await openapi.open_gate()
 
+    async def _web(self, camera: str) -> tuple[dict, VigiWeb]:
+        """The camera's web page API, signed in with the password Frigate uses."""
+
+        if not _CAMERA.match(camera):
+            raise FrigateError("frigate_invalid_request", "攝影機名稱不正確")
+        access = camera_access(await (await self.api()).raw_config(), camera)
+        return access, VigiWeb(self.session, access["host"], access["password"])
+
+    async def _openapi_ready(self, camera: str) -> None:
+        """Wait for a just-enabled OpenAPI to answer (the camera starts it anew)."""
+
+        last: CameraError | None = None
+        for attempt in range(5):
+            if attempt:
+                await self.sleep(2)
+            try:
+                _access, openapi = await self._openapi(camera)
+                await openapi.device()
+                return
+            except CameraError as err:
+                if err.code not in ("camera_openapi_off", "camera_unreachable"):
+                    raise
+                last = err
+        raise last or CameraError("camera_openapi_off", "OpenAPI 沒有回應")
+
+    async def vigi_setup(self, msg: dict) -> dict:
+        """One tap for what an installer would otherwise do on the camera's page.
+
+        OpenAPI on (and answering); on license plate models also recognition
+        on, the Alarm Server pointed at this hub, the gate opened by the camera
+        itself for an allowed plate (自動開閘, on unless switched off before)
+        and the camera's allow / block list merged into the platform's, then
+        kept equal to it. Each step reports on its own and the rest still runs.
+        """
+
+        camera = str(msg.get("camera") or "")
+        steps: list[dict] = []
+
+        def step(
+            name: str, error: CameraError | None = None, state: str = "ok"
+        ) -> None:
+            steps.append(
+                {
+                    "id": name,
+                    "state": "failed" if error else state,
+                    "message": error.message if error else None,
+                }
+            )
+
+        async with self.web_locks.setdefault(camera, asyncio.Lock()):
+            access, web = await self._web(camera)
+            result: dict[str, Any] = {
+                "camera": camera,
+                "host": access["host"],
+                "model": None,
+                "lpr": False,
+                "steps": steps,
+            }
+            try:
+                await web.login()
+                device = await web.device()
+            except CameraError as err:
+                step("login", err)
+                return result
+            step("login")
+            result["model"] = device["model"]
+            result["lpr"] = "LPR" in str(device["model"] or "").upper()
+            try:
+                await web.enable_openapi()
+                await self._openapi_ready(camera)
+            except CameraError as err:
+                step("openapi", err)
+            else:
+                step("openapi")
+            if not result["lpr"]:
+                return result
+
+            try:
+                await web.enable_plates()
+            except CameraError as err:
+                step("recognition", err)
+            else:
+                step("recognition")
+
+            try:
+                target = await self._alarm_server(camera, access["host"])
+                if not target["host"]:
+                    raise CameraError(
+                        "camera_alarm_server_failed", "找不到主機與攝影機同網段的位址"
+                    )
+                await web.point_alarm_server(
+                    target["host"], target["port"], target["path"]
+                )
+            except CameraError as err:
+                step("alarm", err)
+            else:
+                step("alarm")
+
+            auto = (await self.plates.cameras()).get(camera, {}).get("autoGate")
+            auto = auto is not False
+            try:
+                await web.set_gate(auto)
+            except CameraError as err:
+                step("gate", err)
+                await self.plates.set_camera(camera, cameraGate=False)
+            else:
+                step("gate")
+                await self.plates.set_camera(camera, autoGate=auto, cameraGate=True)
+
+            try:
+                rows = await web.plates()
+                entries = await self.plates.entries()
+                zone = zone_of(self.time_zone())
+                merged = merge_rows(entries, rows, zone)
+                if len(merged) != len(entries):
+                    await self.plates.replace(merged)
+                pending = sum(map(len, plan_sync(merged, rows, zone)))
+            except CameraError as err:
+                step("list", err)
+            else:
+                step("list", state="running" if pending else "ok")
+                result["merged"] = len(merged) - len(entries)
+                await self.plates.set_camera(
+                    camera,
+                    cameraList=True,
+                    listSync={"state": "ok", "at": _now(), "total": len(merged)},
+                )
+                if pending:
+                    self._sync_plates_later(camera)
+            await self.plates.set_camera(camera, setupAt=_now())
+            result["plates"] = await self.plates.camera_settings(camera)
+        return result
+
+    def _sync_plates_later(self, camera: str) -> None:
+        """Copy the platform's list to the camera; a newer save restarts it."""
+
+        running = self.plate_syncs.get(camera)
+        if running is not None and not running.done():
+            running.cancel()
+        self.plate_syncs[camera] = self.create_task(
+            self._sync_plates(camera), f"rexlite_lpr_sync_{camera}"
+        )
+
+    async def _sync_plates(self, camera: str) -> None:
+        await self.plates.set_camera(
+            camera, listSync={"state": "running", "at": _now()}
+        )
+        try:
+            async with self.web_locks.setdefault(camera, asyncio.Lock()):
+                _access, web = await self._web(camera)
+                entries = await self.plates.entries()
+                rows = await web.plates()
+                adds, updates, removals = plan_sync(
+                    entries, rows, zone_of(self.time_zone())
+                )
+                await web.apply_plates(adds, updates, removals)
+        except (CameraError, FrigateError) as err:
+            outcome = {"state": "failed", "message": err.message}
+        except Exception:  # noqa: BLE001 - the state must not stay "running"
+            outcome = {"state": "failed", "message": "名單同步到攝影機失敗"}
+        else:
+            outcome = {
+                "state": "ok",
+                "total": len(entries),
+                "added": len(adds),
+                "updated": len(updates),
+                "removed": len(removals),
+            }
+        await self.plates.set_camera(camera, listSync={**outcome, "at": _now()})
+
     async def _onvif_device(self, access: dict) -> dict:
         """Manufacturer and model over ONVIF, for a camera whose OpenAPI is off."""
 
@@ -1742,8 +1923,14 @@ class FrigateBridge:
                 await openapi.open_gate()
                 await self.plates.log_manual(camera, access["label"])
             elif op == "auto_gate":
+                enabled = bool(msg.get("enabled"))
+                if (await self.plates.camera_settings(camera))["cameraGate"]:
+                    # The camera opens the gate itself: switch its own rule.
+                    async with self.web_locks.setdefault(camera, asyncio.Lock()):
+                        _access, web = await self._web(camera)
+                        await web.set_gate(enabled)
                 result["plates"] = await self.plates.set_camera(
-                    camera, autoGate=bool(msg.get("enabled"))
+                    camera, autoGate=enabled
                 )
             elif op == "lpr_trigger":
                 video, alarm = bool(msg.get("video")), bool(msg.get("alarm"))
@@ -1811,7 +1998,15 @@ class FrigateBridge:
         return await self.plates.snapshot(int(msg.get("limit") or 50))
 
     async def lpr_list_save(self, msg: dict) -> dict:
-        return {"entries": await self.plates.replace(msg.get("entries"))}
+        entries = await self.plates.replace(msg.get("entries"))
+        syncing = [
+            camera
+            for camera, settings in (await self.plates.cameras()).items()
+            if settings.get("cameraList")
+        ]
+        for camera in syncing:
+            self._sync_plates_later(camera)
+        return {"entries": entries, "syncing": syncing}
 
     async def _camera_for_host(self, host: str) -> tuple[str | None, str | None]:
         now = time.monotonic()
@@ -2307,6 +2502,7 @@ def register_frigate_bridge(hass: Any) -> FrigateBridge:
             },
             bridge.vigi_control,
         ),
+        handler("vigi_setup", {vol.Required("camera"): camera}, bridge.vigi_setup),
         handler(
             "lpr_records",
             {

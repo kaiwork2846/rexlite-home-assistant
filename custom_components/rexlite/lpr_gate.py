@@ -10,8 +10,12 @@ the hub looks the plate up in the platform's list:
 - any other plate is logged as 未登記.
 
 Each decision is kept (the last ``MAX_LOG``) and handed to ``fire`` so Home
-Assistant automations can react. The camera's own allow / block lists have no
-API, so they stay as the installer set them on the camera.
+Assistant automations can react.
+
+Once a camera was set up in one tap (``vigi_web``), the camera holds a copy of
+this list and opens the gate itself (``cameraGate``): faster, and it keeps
+working while the hub is away. The hub then only logs, and never pulses the
+relay a second time (a single-button gate would close again).
 """
 
 from __future__ import annotations
@@ -189,6 +193,14 @@ class PlateGate:
             await self._save()
         return cleaned
 
+    async def entries(self) -> list[dict]:
+        await self.load()
+        return [dict(entry) for entry in self.data["entries"]]
+
+    async def cameras(self) -> dict[str, dict]:
+        await self.load()
+        return {key: dict(value) for key, value in self.data["cameras"].items()}
+
     async def camera_settings(self, camera: str) -> dict:
         await self.load()
         current = self.data["cameras"].get(camera) or {}
@@ -196,6 +208,11 @@ class PlateGate:
             "autoGate": current.get("autoGate") is True,
             # The camera has no read-back: this is what the platform last set.
             "trigger": current.get("trigger"),
+            # Set up in one tap: the camera opens the gate and holds the list.
+            "cameraGate": current.get("cameraGate") is True,
+            "cameraList": current.get("cameraList") is True,
+            "listSync": current.get("listSync"),
+            "setupAt": current.get("setupAt"),
         }
 
     async def set_camera(self, camera: str, **changes: Any) -> dict:
@@ -275,6 +292,9 @@ class PlateGate:
                 decision["action"] = "blocked"
             elif entry and not (camera and settings.get("autoGate") is True):
                 decision["action"] = "auto_off"
+            elif entry and settings.get("cameraGate") is True:
+                # The camera matched its own copy of the list and opened.
+                decision["action"] = "camera"
             elif entry:
                 try:
                     await self.open_gate(camera)
