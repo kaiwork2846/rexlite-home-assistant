@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.41
+
+- 新增 `rexlite/frigate/vigi_setup`（admin）：VIGI／InSight 攝影機一鍵設定，不必再登入攝影機網頁。以 Frigate 設定裡的帳密走攝影機網頁本身的 JSON API（`vigi_web`；請求格式取自 TP-Link 公開的 InSight LPR345Z 網頁模擬器，登入方式與 VIGICam 專案的實機記錄一致）：開啟 OpenAPI 並等它回應；LPR 機型再開啟車牌辨識（影像觸發）、把 Alarm Server 指向中樞的 webhook、設定開閘連動（只有白名單車牌輸出繼電器）、合併並同步白／黑名單。每一步各自回報結果，登入失敗不做任何變更。
+- 白／黑名單存進攝影機：第一次設定先把攝影機上平台沒有的車牌併入平台名單，之後以平台為準，每次儲存名單都在背景同步到攝影機（新增、修改、刪除；進度在 `listSync`）。攝影機自己比對名單、自己開閘，中樞離線也能進出；中樞收到該車牌只記錄為 `camera`，不再送第二次開閘訊號。
+- `vigi_control` 的 `auto_gate`：攝影機自己開閘時，改的是攝影機的開閘連動。
+- `vigi_info.plates`、`lpr_list.cameras` 加上 `cameraGate`、`cameraList`、`listSync`、`setupAt`；`lpr_list_save` 回傳 `syncing`。
+- 尚未以 LPR345Z 實機驗證；失敗的步驟仍可在攝影機網頁手動設定。
+
 ## 0.1.40
 
 - VIGI 一鍵開通支援 InSight 機型（如 InSight LPR345Z）：先走官方 OpenAPI 初始化（VIGI IPC Open API Document V1.3 §2.4：`https://<ip>/openapi/initialize` 的 `getEncrptInfo` 取得攝影機自己的 RSA 金鑰，再 `setPassword`），不支援時才用原本攝影機網頁的 `set_password`（VIGI C540V）。網頁 API 沒有回應開通狀態的攝影機，以 OpenAPI 初始化是否開放判斷是否為全新／重置。`activate` 回傳 `method`（`openapi`／`web`）。
