@@ -36,6 +36,8 @@ SCENE_LAYOUTS = {
     "M-0085_A-00BB-12-301A": ("MD-4", "O-2-0_R-56", "UP-59_R-62", "8 bit scene number"),
     "M-0085_A-00BC-10-3A06": ("MD-4", "O-2-0_R-56", "UP-59_R-62", "8 bit scene number"),
     "M-0085_A-00BD-10-3994": ("MD-4", "O-2-0_R-56", "UP-59_R-62", "8 bit scene number"),
+    "M-0085_A-00BC-12-78B4": ("MD-4", "O-2-0_R-56", "UP-59_R-62", "8 bit scene number"),
+    "M-0085_A-00BD-12-0DBA": ("MD-4", "O-2-0_R-56", "UP-59_R-62", "8 bit scene number"),
     "M-02F0_A-0098-10-B2ED-O0085": (
         "MD-5",
         "O-2-2_R-116",
@@ -92,6 +94,8 @@ WALL_KEY_APPLICATIONS = frozenset(BUTTON_SCENE_LAYOUTS) | {
     "M-0085_A-00BB-12-301A",
     "M-0085_A-00BC-10-3A06",
     "M-0085_A-00BD-10-3994",
+    "M-0085_A-00BC-12-78B4",
+    "M-0085_A-00BD-12-0DBA",
 }
 
 

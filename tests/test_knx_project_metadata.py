@@ -17,6 +17,12 @@ SPEC = importlib.util.spec_from_file_location(
 )
 metadata = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(metadata)
+MAPPER_SPEC = importlib.util.spec_from_file_location(
+    "knx_metadata_test_mapper",
+    Path(__file__).parents[1] / "custom_components/rexlite/knx_project_mapper.py",
+)
+mapper = importlib.util.module_from_spec(MAPPER_SPEC)
+MAPPER_SPEC.loader.exec_module(mapper)
 
 APP = "M-02F0_A-0098-10-B2ED-O0085"
 MODULE = "MD-5_M-21_MI-1"
@@ -363,6 +369,72 @@ class ButtonSceneMetadataTests(unittest.TestCase):
                 self.assertTrue(
                     set(metadata._CHPB_SCENE_OBJECTS.items()) <= set(objects.items())
                 )
+
+
+CHPBD_V12 = ("M-0085_A-00BC-12-78B4", "M-0085_A-00BD-12-0DBA")
+# Button 6 of a CHPBD-06 (ETS module instance M-9), as in the D3-7F project.
+CHPBD_OBJECT = "MD-4_M-9_MI-1_O-2-0_R-56"
+CHPBD_REFERENCE = "MD-4_M-9_MI-1_UP-59_R-62"
+
+
+class DisplayButtonSceneMetadataTests(unittest.TestCase):
+    """GVS CHPBD 1.2: a button's scene number sits in its own module instance."""
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.path = Path(self.directory.name) / "sample.knxproj"
+
+    def archive(self, application, values):
+        with ZipFile(self.path, "w") as archive:
+            archive.writestr(
+                "P-0001/0.xml", chpb_device_xml(values, CHPBD_OBJECT, application)
+            )
+            archive.writestr(
+                f"{application[:6]}/{application}.xml",
+                chpb_app_xml(["MD-4_UP-59_R-62"], application),
+            )
+
+    def test_version_1_2_reads_the_module_scene_number(self):
+        for application in CHPBD_V12:
+            with self.subTest(application=application):
+                self.archive(application, {CHPBD_REFERENCE: "3"})
+                parsed = chpb_project(CHPBD_OBJECT, application)
+                result = metadata.enrich_project(parsed, self.path)
+                group = result["group_addresses"]["1/0/1"]
+                self.assertEqual(group["scene_number"], 3)
+                self.assertIs(group["scene_wall_key"], True)
+
+    def test_version_1_2_scene_key_maps_to_a_scene(self):
+        # A scene key left at the program default, linked only to its address.
+        for application in CHPBD_V12:
+            with self.subTest(application=application):
+                self.archive(application, {})
+                parsed = chpb_project(CHPBD_OBJECT, application)
+                parsed["info"]["guid"] = "test-project-guid"
+                parsed["functions"] = {}
+                parsed["group_addresses"] = {
+                    "0/7/6": {
+                        **parsed["group_addresses"]["1/0/1"],
+                        "address": "0/7/6",
+                        "name": "7F-測試 面板1 按鈕-6",
+                        "dpt": {"main": 18, "sub": 1},
+                    }
+                }
+                sender = parsed["communication_objects"][f"1.1.1/{CHPBD_OBJECT}"]
+                sender["group_address_links"] = ["0/7/6"]
+                plan = mapper.plan_project(metadata.enrich_project(parsed, self.path))
+                scene = plan["config"]["scene"][0]
+                self.assertEqual(
+                    (scene["address"], scene["scene_number"]), ("0/7/6", 1)
+                )
+                self.assertNotIn(
+                    "missing_explicit_scene_number",
+                    {skipped["reason"] for skipped in plan["skipped"]},
+                )
+
+    def test_version_1_2_buttons_are_wall_keys(self):
+        self.assertLessEqual(set(CHPBD_V12), metadata.WALL_KEY_APPLICATIONS)
 
 
 if __name__ == "__main__":
