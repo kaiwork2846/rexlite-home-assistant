@@ -164,6 +164,7 @@ CONTRACT_V1_LOOPS = [
             ("亮度狀態", (5, 1), "InfoDimmingValue", True),
             ("色溫", (7, 600), "", False),
             ("色溫狀態", (7, 600), "", True),
+            ("相對色溫", (3, 7), "", False),
         ],
     ),
     (
@@ -1091,8 +1092,9 @@ class KNXProjectMappingTests(unittest.TestCase):
                 )
             },
         )
-        # Only deliberately non-entity addresses are left: relative dimming and
-        # the dry-contact curtain's wall-button up/down and stop.
+        # Only deliberately non-entity addresses are left: relative dimming,
+        # relative colour temperature and the dry-contact curtain's wall-button
+        # up/down and stop.
         self.assertEqual(
             sorted(result["skipped"], key=lambda row: row["address"]),
             sorted(
@@ -1100,6 +1102,7 @@ class KNXProjectMappingTests(unittest.TestCase):
                     {"address": table[key], "reason": "function_role_not_exposed"}
                     for key in (
                         ("1F-客廳-吊燈1", "相對調光"),
+                        ("1F-客廳-線燈1", "相對色溫"),
                         ("2F-主臥-窗簾1", "上下"),
                         ("2F-主臥-窗簾1", "停止"),
                     )
@@ -1228,6 +1231,28 @@ class KNXProjectMappingTests(unittest.TestCase):
             "fan_speed_address",
             {row["name"]: row for row in result["config"]["climate"]}["1F-客廳-冷氣1"],
         )
+
+    def test_relative_colour_temperature_needs_its_prefix_and_dpt(self):
+        for name, dpt in (
+            ("1F-客廳-線燈2 相對色溫", {"main": 3, "sub": 7}),
+            ("1F-客廳-線燈1 相對色溫", {"main": 5, "sub": 1}),
+        ):
+            p, table = contract_v1_project()
+            address = table[("1F-客廳-線燈1", "相對色溫")]
+            p["group_addresses"][address]["name"] = name
+            p["group_addresses"][address]["dpt"] = dpt
+            result = mapper.plan_project(p)
+            reasons = {
+                row["reason"] for row in result["skipped"] if row["address"] == address
+            }
+            self.assertTrue(reasons)
+            self.assertNotIn("function_role_not_exposed", reasons)
+            light = {row["name"]: row for row in result["config"]["light"]}[
+                "1F-客廳-線燈1"
+            ]
+            self.assertEqual(
+                light["color_temperature_address"], table[("1F-客廳-線燈1", "色溫")]
+            )
 
     def test_function_colour_temperature_feedback_must_match_command_encoding(self):
         p, table = contract_v1_project()
