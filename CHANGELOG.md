@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.45
+
+- KNX：乾接點窗簾（REXLiTE KNX Contract `CurtainImpulse`）有牆面按鍵位址（`上下` 1.008、`停止` 1.007）時，改成**一個 KNX `cover`**，不再是開／關／停三個 `button`：`move_long_address`＝上下、`stop_address`＝停止、`device_class: blind`、`travelling_time_down`／`travelling_time_up` 25 秒（照 ipc-dev-1 的現場範本）。HA 跟牆面按鍵、7TS 一樣送到這兩個位址，由 7TS／按鍵面板的 LOGIC 轉成脈衝；三個脈衝位址改列 `function_role_not_exposed`。沒有牆面按鍵位址的舊專案（2026-10-02 以前的 Contract）照舊三個按鈕。
+- `MAPPER_REVISION` 12 → 13：升版後已部署的專案會重新對應，窗簾的三個按鈕實體換成一個窗簾實體（unique_id 以 `上下` 位址為準）；用到那三個按鈕的自動化要改用窗簾。
+
 ## 0.1.44
 
 - KNX：REXLiTE KNX Contract 的色溫燈多一個「相對色溫」成員（`{Function 名} 相對色溫`，DPT 3.007，按住變暖／變冷，給牆面按鍵用；REXLiTE ETS App 0.42.11 起每盞色溫燈都有）。它沒有標準 ETS Role，以前會列成 `unresolved_function_role`；現在跟「相對調光」一樣列 `function_role_not_exposed`，不進 HA。名稱前綴必須等於 Function 名、DPT 必須是 3.007，否則照舊 `unresolved_function_role`。燈本身（開關、亮度、絕對色溫）不受影響。

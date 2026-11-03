@@ -244,6 +244,21 @@ CONTRACT_V1_LOOPS = [
 ]
 
 
+def impulse_curtain_without_wall_buttons():
+    """The contract home as exported before the curtain's wall-button members."""
+    p, table = contract_v1_project()
+    function = next(f for f in p["functions"].values() if f["name"] == "2F-主臥-窗簾1")
+    for suffix in ("上下", "停止"):
+        address = table[("2F-主臥-窗簾1", suffix)]
+        function["group_addresses"] = {
+            k: v
+            for k, v in function["group_addresses"].items()
+            if v.get("address") != address and k != address
+        }
+        del p["group_addresses"][address]
+    return p, table
+
+
 def contract_v1_project(loops=None):
     """Synthetic xknxproject output shaped like a Contract v1 ETS6 export."""
     groups, objects, functions, table = [], {}, {}, {}
@@ -1057,8 +1072,7 @@ class KNXProjectMappingTests(unittest.TestCase):
         p, table = contract_v1_project()
         result = mapper.plan_project(p)
         by_name = {e["name"]: e for e in result["entities"]}
-        # The dry-contact curtain is three buttons, not one entity; checked below.
-        loops = [loop for loop in CONTRACT_V1_LOOPS if loop[1] != "2F-主臥-窗簾1"]
+        loops = list(CONTRACT_V1_LOOPS)
         self.assertEqual(
             {name: by_name[name]["platform"] for _, name, _ in loops},
             {
@@ -1069,6 +1083,7 @@ class KNXProjectMappingTests(unittest.TestCase):
                 "2F-主臥-插座1": "switch",
                 "1F-客廳-窗簾1": "cover",
                 "2F-主臥-百葉1": "cover",
+                "2F-主臥-窗簾1": "cover",
                 "1F-客廳-冷氣1": "climate",
                 "2F-浴室-地暖1": "climate",
             },
@@ -1076,25 +1091,23 @@ class KNXProjectMappingTests(unittest.TestCase):
         self.assertTrue(
             all(by_name[name]["source"] == "ets-function-role" for _, name, _ in loops)
         )
-        buttons = {row["name"]: row for row in result["config"]["button"]}
+        self.assertNotIn("button", result["config"])
+        covers = {row["name"]: row for row in result["config"]["cover"]}
         self.assertEqual(
-            buttons,
+            covers["2F-主臥-窗簾1"],
             {
-                f"2F-主臥-窗簾1 {label}": {
-                    "name": f"2F-主臥-窗簾1 {label}",
-                    "unique_id": by_name[f"2F-主臥-窗簾1 {label}"]["uniqueId"],
-                    "address": table[("2F-主臥-窗簾1", suffix)],
-                }
-                for label, suffix in (
-                    ("開", "開脈衝"),
-                    ("關", "關脈衝"),
-                    ("停", "停脈衝"),
-                )
+                "name": "2F-主臥-窗簾1",
+                "unique_id": by_name["2F-主臥-窗簾1"]["uniqueId"],
+                "move_long_address": table[("2F-主臥-窗簾1", "上下")],
+                "stop_address": table[("2F-主臥-窗簾1", "停止")],
+                "device_class": "blind",
+                "travelling_time_down": 25,
+                "travelling_time_up": 25,
             },
         )
         # Only deliberately non-entity addresses are left: relative dimming,
-        # relative colour temperature and the dry-contact curtain's wall-button
-        # up/down and stop.
+        # relative colour temperature and the dry-contact curtain's three
+        # impulses, which the cover reaches through the wall-button logic.
         self.assertEqual(
             sorted(result["skipped"], key=lambda row: row["address"]),
             sorted(
@@ -1103,8 +1116,9 @@ class KNXProjectMappingTests(unittest.TestCase):
                     for key in (
                         ("1F-客廳-吊燈1", "相對調光"),
                         ("1F-客廳-線燈1", "相對色溫"),
-                        ("2F-主臥-窗簾1", "上下"),
-                        ("2F-主臥-窗簾1", "停止"),
+                        ("2F-主臥-窗簾1", "開脈衝"),
+                        ("2F-主臥-窗簾1", "關脈衝"),
+                        ("2F-主臥-窗簾1", "停脈衝"),
                     )
                 ),
                 key=lambda row: row["address"],
@@ -1140,24 +1154,18 @@ class KNXProjectMappingTests(unittest.TestCase):
         sensors = {row["name"] for row in result["config"]["sensor"]}
         self.assertLessEqual({"1F-客廳-感測器 溫度", "1F-客廳-感測器 照度"}, sensors)
 
-    def test_impulse_curtain_wall_button_members_are_not_exposed(self):
+    def test_impulse_curtain_with_wall_buttons_is_one_cover(self):
         # Contract CurtainImpulse with wall buttons: a CHPB key (long = up/down
         # 1.008, short = stop 1.007) and the 7TS buttons send to these two
-        # addresses, and the 7TS logic turns them into 1s on the impulse
-        # addresses. HA already writes the impulses directly, so the two are
-        # real bus functions but not part of the entity - and they must not
-        # make the curtain a "mixed roles" function either.
+        # addresses, and the 7TS or panel logic turns them into 1s on the
+        # impulse addresses. HA drives the curtain the same way, as one cover.
         p, table = contract_v1_project()
         result = mapper.plan_project(p)
-        buttons = {row["name"] for row in result["config"]["button"]}
-        self.assertLessEqual(
-            {f"2F-主臥-窗簾1 {label}" for label in ("開", "關", "停")}, buttons
-        )
-        self.assertNotIn(
-            "2F-主臥-窗簾1",
-            {row["name"] for row in result["config"].get("cover", [])},
-        )
-        for suffix in ("上下", "停止"):
+        cover = {row["name"]: row for row in result["config"]["cover"]}["2F-主臥-窗簾1"]
+        self.assertEqual(cover["move_long_address"], table[("2F-主臥-窗簾1", "上下")])
+        self.assertEqual(cover["stop_address"], table[("2F-主臥-窗簾1", "停止")])
+        self.assertNotIn("button", result["config"])
+        for suffix in ("開脈衝", "關脈衝", "停脈衝"):
             self.assertIn(
                 {
                     "address": table[("2F-主臥-窗簾1", suffix)],
@@ -1165,6 +1173,28 @@ class KNXProjectMappingTests(unittest.TestCase):
                 },
                 result["skipped"],
             )
+
+    def test_impulse_curtain_without_wall_buttons_stays_three_buttons(self):
+        # Projects from before the wall-button members (contract 2026-10-02)
+        # have no up/down to drive: HA keeps writing the impulses directly.
+        p, table = impulse_curtain_without_wall_buttons()
+        result = mapper.plan_project(p)
+        buttons = {row["name"]: row for row in result["config"]["button"]}
+        self.assertEqual(
+            {name: row["address"] for name, row in buttons.items()},
+            {
+                f"2F-主臥-窗簾1 {label}": table[("2F-主臥-窗簾1", suffix)]
+                for label, suffix in (
+                    ("開", "開脈衝"),
+                    ("關", "關脈衝"),
+                    ("停", "停脈衝"),
+                )
+            },
+        )
+        self.assertNotIn(
+            "2F-主臥-窗簾1",
+            {row["name"] for row in result["config"].get("cover", [])},
+        )
 
     def test_impulse_curtain_close_accepts_switch_or_up_down_datapoint(self):
         # Since ETS App 0.18.3 the close impulse is 1.008 (Down = 1): the
@@ -1185,9 +1215,12 @@ class KNXProjectMappingTests(unittest.TestCase):
                                 table[("2F-主臥-窗簾1", "上下")]
                             )
                 result = mapper.plan_project(p)
-                buttons = {row["name"]: row for row in result["config"]["button"]}
-                self.assertEqual(buttons["2F-主臥-窗簾1 關"]["address"], close)
-                self.assertNotIn(close, {row["address"] for row in result["skipped"]})
+                covers = {row["name"]: row for row in result["config"]["cover"]}
+                self.assertIn("2F-主臥-窗簾1", covers)
+                self.assertIn(
+                    {"address": close, "reason": "function_role_not_exposed"},
+                    result["skipped"],
+                )
 
     def test_partial_impulse_curtain_is_rejected_not_guessed(self):
         p, table = contract_v1_project()
@@ -1199,6 +1232,10 @@ class KNXProjectMappingTests(unittest.TestCase):
         del p["group_addresses"][stop]
         result = mapper.plan_project(p)
         self.assertNotIn("button", result["config"])
+        self.assertNotIn(
+            "2F-主臥-窗簾1",
+            {row["name"] for row in result["config"].get("cover", [])},
+        )
         self.assertIn(
             {
                 "address": table[("2F-主臥-窗簾1", "開脈衝")],
@@ -1502,6 +1539,7 @@ class KNXProjectMappingTests(unittest.TestCase):
             ),
             project(ga("4/0/1", "Scene bus", 18, 1), functions={"S1": scene}),
             contract_v1_project()[0],
+            impulse_curtain_without_wall_buttons()[0],
             independent_units(
                 "13F-A12",
                 [
