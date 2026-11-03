@@ -17,7 +17,7 @@ from typing import Any
 
 MAX_GROUP_ADDRESSES = 65535
 MAX_ENTITIES = 2000
-MAPPER_REVISION = 12
+MAPPER_REVISION = 13
 
 # DPT 5.100 "fan stage": GVS BTPG air-conditioner gateways (REXLiTE ETS App
 # 0.35.0) and the HERA 7TS/3TS screens send 0 for auto and 1..4 for low,
@@ -81,10 +81,21 @@ IMPULSE_BUTTONS = {
 
 # The same dry-contact curtain may also carry the addresses its wall buttons
 # send to (a GVS CHPB key in blind mode: long press up/down 1.008, short press
-# stop/step 1.007; the 7TS logic turns them into the 1s above). They are real
-# bus functions, but HA already drives the impulses directly, so they are
-# reported as not exposed rather than blocking the curtain as mixed roles.
+# stop/step 1.007; the 7TS or panel logic turns them into the 1s above). With
+# both of them the curtain is one KNX cover on those two addresses, the way the
+# wall buttons and the 7TS drive it (since 0.1.45, MAPPER_REVISION 13): up/down
+# on the up/down address, stop as a 1 on the stop/step one, which the logic
+# turns into the stop impulse. The impulse addresses are then not exposed.
+# Without them (projects from before contract 2026-10-02) it stays three buttons.
 IMPULSE_WALL_BUTTON_FIELDS = {"move_long_address", "move_short_address"}
+
+# The dry-contact cover: no position feedback, so a blind run for a fixed time
+# each way (the field's template, ipc-dev-1 2026-11-03).
+IMPULSE_COVER = {
+    "device_class": "blind",
+    "travelling_time_down": 25,
+    "travelling_time_up": 25,
+}
 
 # Longest suffix wins. A separator and a non-empty exact prefix are required.
 # This supports existing installer naming without combining vaguely similar
@@ -893,8 +904,28 @@ class _Planner:
                 self.issues.setdefault(address, error)
             return
         if impulse := fields.keys() & IMPULSE_BUTTONS.keys():
-            for field in fields.keys() & IMPULSE_WALL_BUTTON_FIELDS:
-                address = fields.pop(field)
+            wall = {
+                field: fields.pop(field)
+                for field in sorted(fields.keys() & IMPULSE_WALL_BUTTON_FIELDS)
+            }
+            if fields.keys() == IMPULSE_BUTTONS.keys() and wall.keys() == (
+                IMPULSE_WALL_BUTTON_FIELDS
+            ):
+                for address in fields.values():
+                    self.non_entity_members.add(address)
+                    self.reserved.add(address)
+                self._add(
+                    "cover",
+                    name,
+                    {
+                        "move_long_address": wall["move_long_address"],
+                        "stop_address": wall["move_short_address"],
+                        **IMPULSE_COVER,
+                    },
+                    source,
+                )
+                return
+            for address in wall.values():
                 self.non_entity_members.add(address)
                 self.reserved.add(address)
             if fields.keys() != IMPULSE_BUTTONS.keys():
