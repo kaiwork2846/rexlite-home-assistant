@@ -165,6 +165,14 @@ NON_ENTITY_FUNCTION_ROLES = {
     "windowstatus",
 }
 
+# Function members without a standard role that are still deliberate wall-button
+# functions, never an entity field: the REXLiTE KNX Contract's relative colour
+# temperature (DPT 3.007, hold to go warmer/cooler) next to a tunable white
+# light. Same exact-prefix rule as NAME_ROLES; the DPT must match too.
+NON_ENTITY_NAME_SUFFIXES = {
+    "相對色溫": (3, 7),
+}
+
 # Measurement-only fallbacks never expose a write action. Other exact DPTs can
 # still be represented when a communication object proves this is telemetry.
 MEASUREMENT_DPTS = {
@@ -1008,6 +1016,22 @@ class _Planner:
             return
         self._add(platform, name, fields, source)
 
+    def _non_entity_member(self, function_name: str, address: str) -> bool:
+        """Whether a role-less Function member is a known wall-button function
+        (`NON_ENTITY_NAME_SUFFIXES`): exact Function-name prefix and DPT."""
+        name = _label(self.groups.get(address, {}).get("name"), "")
+        for suffix, dpt in NON_ENTITY_NAME_SUFFIXES.items():
+            match = re.fullmatch(
+                r"(.+?)[\s_-]+" + re.escape(suffix), name, re.IGNORECASE
+            )
+            if (
+                match
+                and match.group(1).strip().casefold() == function_name.casefold()
+                and self.dpts.get(address) == dpt
+            ):
+                return True
+        return False
+
     def _function_member_role(self, function_name: str, address: str) -> str | None:
         """Resolve a Function member without a standard ETS DatapointRole.
 
@@ -1041,7 +1065,10 @@ class _Planner:
                 elif role not in ROLE_FIELDS and role != "temproomsetpoint":
                     named = self._function_member_role(function_name, address)
                     if named is None:
-                        self.unresolved_members.add(address)
+                        if self._non_entity_member(function_name, address):
+                            self.non_entity_members.add(address)
+                        else:
+                            self.unresolved_members.add(address)
                         continue
                     role = named
                 # TempRoomSetpoint is not inherently a write or state role. Use

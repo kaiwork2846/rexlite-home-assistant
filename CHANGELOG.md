@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.44
+
+- KNX：REXLiTE KNX Contract 的色溫燈多一個「相對色溫」成員（`{Function 名} 相對色溫`，DPT 3.007，按住變暖／變冷，給牆面按鍵用；REXLiTE ETS App 0.42.11 起每盞色溫燈都有）。它沒有標準 ETS Role，以前會列成 `unresolved_function_role`；現在跟「相對調光」一樣列 `function_role_not_exposed`，不進 HA。名稱前綴必須等於 Function 名、DPT 必須是 3.007，否則照舊 `unresolved_function_role`。燈本身（開關、亮度、絕對色溫）不受影響。
+- `MAPPER_REVISION` 不變（仍是 12）：只改跳過的原因，不會多或少任何實體。
+
 ## 0.1.43
 
 - KNX 情境：GVS CHPBD 按鍵面板應用程式 1.2 的情境鍵也從發送端參數讀場景號。`SCENE_LAYOUTS`／`WALL_KEY_APPLICATIONS` 加入 CHPBD-04 `00BC-12-78B4`、CHPBD-06 `00BD-12-0DBA`（版面同 1.0：`MD-4`、`O-2-0_R-56`、`UP-59_R-62`「8 bit scene number」，已用 D3-7F 匯出專案的應用程式 XML 核對）；CHPBD-02 1.2 `00BB-12-301A` 本來就在表上。REXLiTE ETS App 的 CHPBD-02／04／06 profile 都釘在 1.2，之前這兩款的情境鍵被當成 `missing_explicit_scene_number` 跳過，HA 沒有 scene。D3-7F 專案：0/7/4～0/7/6（CHPBD-06 按鈕-4～6）多出 3 個 scene，skipped 只剩 `function_role_not_exposed`。
