@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.46
+
+- KNX：乾接點窗簾（REXLiTE KNX Contract `CurtainImpulse`）的 cover 行程時間改讀 ETS：`上下` 位址的 Description 是「房間 · travel_down=18 travel_up=32」（REXLiTE ETS App 0.42.14 起由 SI 在 App 填、到現場量的秒數）時，`travelling_time_down`／`travelling_time_up` 就用這兩個數字。Description 沒有這段（舊專案）或秒數不在 3～300 之間，照舊兩個都 25 秒。只有乾接點窗簾讀 Description，其他實體不受影響。
+- `MAPPER_REVISION` 不變（仍是 13）：舊專案的輸出一模一樣；帶秒數的新 `.knxproj` 本來就是新的專案指紋，上傳後一定重新對應。
+
 ## 0.1.45
 
 - KNX：乾接點窗簾（REXLiTE KNX Contract `CurtainImpulse`）有牆面按鍵位址（`上下` 1.008、`停止` 1.007）時，改成**一個 KNX `cover`**，不再是開／關／停三個 `button`：`move_long_address`＝上下、`stop_address`＝停止、`device_class: blind`、`travelling_time_down`／`travelling_time_up` 25 秒（照 ipc-dev-1 的現場範本）。HA 跟牆面按鍵、7TS 一樣送到這兩個位址，由 7TS／按鍵面板的 LOGIC 轉成脈衝；三個脈衝位址改列 `function_role_not_exposed`。沒有牆面按鍵位址的舊專案（2026-10-02 以前的 Contract）照舊三個按鈕。

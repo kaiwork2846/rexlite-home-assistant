@@ -97,6 +97,13 @@ IMPULSE_COVER = {
     "travelling_time_up": 25,
 }
 
+# Its travel times, measured on site by the SI (REXLiTE ETS App 0.42.14,
+# contract 3.5.1): the up/down address's Description is the room, then
+# " · travel_down=18 travel_up=32". A Description without them (a project from
+# before) or with a time outside the contract's range keeps 25 s each way.
+IMPULSE_TRAVEL_TIME = re.compile(r"travel_down=(\d+) travel_up=(\d+)\s*$")
+IMPULSE_TRAVEL_TIME_RANGE = (3, 300)
+
 # Longest suffix wins. A separator and a non-empty exact prefix are required.
 # This supports existing installer naming without combining vaguely similar
 # labels or inferring a feedback address by incrementing a group address.
@@ -862,6 +869,19 @@ class _Planner:
         )
         self.used.update(addresses)
 
+    def _impulse_travel_times(self, address: str) -> dict[str, int]:
+        description = self.groups[address].get("description")
+        if not isinstance(description, str):
+            return {}
+        match = IMPULSE_TRAVEL_TIME.search(description)
+        if not match:
+            return {}
+        low, high = IMPULSE_TRAVEL_TIME_RANGE
+        down, up = int(match[1]), int(match[2])
+        if not (low <= down <= high and low <= up <= high):
+            return {}
+        return {"travelling_time_down": down, "travelling_time_up": up}
+
     def _group(
         self,
         name: str,
@@ -921,6 +941,7 @@ class _Planner:
                         "move_long_address": wall["move_long_address"],
                         "stop_address": wall["move_short_address"],
                         **IMPULSE_COVER,
+                        **self._impulse_travel_times(wall["move_long_address"]),
                     },
                     source,
                 )

@@ -1174,6 +1174,36 @@ class KNXProjectMappingTests(unittest.TestCase):
                 result["skipped"],
             )
 
+    def test_impulse_curtain_reads_its_travel_times_from_the_up_down_description(self):
+        # ETS App 0.42.14: the SI's measured seconds ride on the up/down
+        # address's Description after the room; anything else keeps 25 s.
+        cases = {
+            "主臥 · travel_down=18 travel_up=32": (18, 32),
+            "主臥 · 窗邊 · travel_down=3 travel_up=300": (3, 300),
+            "主臥": (25, 25),
+            None: (25, 25),
+            "主臥 · travel_down=18": (25, 25),
+            "主臥 · travel_down=0 travel_up=32": (25, 25),
+            "主臥 · travel_down=18 travel_up=301": (25, 25),
+        }
+        for description, (down, up) in cases.items():
+            with self.subTest(description=description):
+                p, table = contract_v1_project()
+                ga = p["group_addresses"][table[("2F-主臥-窗簾1", "上下")]]
+                if description is None:
+                    ga.pop("description", None)
+                else:
+                    ga["description"] = description
+                result = mapper.plan_project(p)
+                covers = {row["name"]: row for row in result["config"]["cover"]}
+                cover = covers["2F-主臥-窗簾1"]
+                self.assertEqual(
+                    (cover["travelling_time_down"], cover["travelling_time_up"]),
+                    (down, up),
+                )
+                # Only the dry-contact curtain reads a Description.
+                self.assertNotIn("travelling_time_down", covers["1F-客廳-窗簾1"])
+
     def test_impulse_curtain_without_wall_buttons_stays_three_buttons(self):
         # Projects from before the wall-button members (contract 2026-10-02)
         # have no up/down to drive: HA keeps writing the impulses directly.
