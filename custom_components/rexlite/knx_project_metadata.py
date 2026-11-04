@@ -370,13 +370,18 @@ def enrich_project(
                     senders.append(object_id)
             except (KeyError, TypeError, ValueError, AttributeError):
                 continue
-            if senders and len(numbers) == 1:
+            if senders and numbers:
+                # Several verified senders with their own numbers on one address
+                # are several scenes: the field's (and REXLiTE ETS App 0.42.18's)
+                # one scene address for the home, a number per wall key.
                 groups[address] = {
                     **ga,
-                    "scene_number": next(iter(numbers)),
+                    "scene_numbers": sorted(numbers),
                     "scene_number_source": "ets-sender-parameter",
                     "scene_sender_ids": sorted(senders),
                 }
+                if len(numbers) == 1:
+                    groups[address]["scene_number"] = next(iter(numbers))
                 if all(
                     project["devices"][objects[sender]["device_address"]]["application"]
                     in WALL_KEY_APPLICATIONS

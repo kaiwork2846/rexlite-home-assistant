@@ -168,7 +168,9 @@ class SceneMetadataTests(unittest.TestCase):
         parsed["group_addresses"]["1/0/1"]["communication_object_ids"].append(unknown)
         self.assertNotIn("scene_number", self.annotated(parsed))
 
-    def test_disagreement_between_verified_senders_blocks_annotation(self):
+    def test_verified_senders_with_their_own_numbers_are_several_scenes(self):
+        # One scene address for the home, a number per wall key (REXLiTE ETS
+        # App 0.42.18; the field's way): until 0.1.47 this was a conflict.
         second_object = OBJECT.replace("MI-1", "MI-2")
         second_reference = REFERENCE.replace("MI-1", "MI-2")
         extra = f'<ParameterInstanceRef RefId="{second_reference}" Value="6" />'
@@ -185,7 +187,11 @@ class SceneMetadataTests(unittest.TestCase):
         parsed["group_addresses"]["1/0/1"]["communication_object_ids"].append(
             f"1.1.1/{second_object}"
         )
-        self.assertNotIn("scene_number", self.annotated(parsed))
+        result = self.annotated(parsed)
+        self.assertNotIn("scene_number", result)
+        self.assertEqual(len(result["scene_numbers"]), 2)
+        self.assertIn(6, result["scene_numbers"])
+        self.assertEqual(len(result["scene_sender_ids"]), 2)
 
     def test_xml_entities_and_duplicate_zip_members_keep_baseline(self):
         self.archive(device='<!DOCTYPE KNX [<!ENTITY e "5">]>' + device_xml("&e;"))
