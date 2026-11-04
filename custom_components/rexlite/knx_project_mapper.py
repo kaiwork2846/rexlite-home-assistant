@@ -17,7 +17,7 @@ from typing import Any
 
 MAX_GROUP_ADDRESSES = 65535
 MAX_ENTITIES = 2000
-MAPPER_REVISION = 13
+MAPPER_REVISION = 14
 
 # DPT 5.100 "fan stage": GVS BTPG air-conditioner gateways (REXLiTE ETS App
 # 0.35.0) and the HERA 7TS/3TS screens send 0 for auto and 1..4 for low,
@@ -329,6 +329,24 @@ def _dict(value: Any) -> dict:
 
 def _list(value: Any) -> list:
     return value if isinstance(value, list) else []
+
+
+def _scene_names(comment: Any) -> dict[int, str]:
+    """Scene number -> name from a scene address's comment, "1=name；2=name".
+
+    REXLiTE ETS App 0.42.18 writes it (ScenePlan.Comment). Not line breaks:
+    xknxproject runs comments through rtf_to_text, which drops them. Anything
+    else in the comment is ignored.
+    """
+    names: dict[int, str] = {}
+    if not isinstance(comment, str):
+        return names
+    for entry in comment.split("；"):
+        number, sep, name = entry.partition("=")
+        number = number.strip()
+        if sep and number.isascii() and number.isdigit() and 1 <= int(number) <= 64:
+            names.setdefault(int(number), name.strip())
+    return names
 
 
 def _label(value: Any, fallback: str) -> str:
@@ -800,12 +818,16 @@ class _Planner:
         for address, ga in sorted(self.groups.items()):
             if address in self.used or address in self.reserved:
                 continue
-            number = ga.get("scene_number")
+            numbers = ga.get("scene_numbers")
+            if numbers is None:
+                numbers = [ga.get("scene_number")]
             sender_ids = ga.get("scene_sender_ids")
             if (
                 ga.get("scene_number_source") != "ets-sender-parameter"
-                or type(number) is not int
-                or not 1 <= number <= 64
+                or not isinstance(numbers, list)
+                or not numbers
+                or len(set(map(repr, numbers))) != len(numbers)
+                or any(type(n) is not int or not 1 <= n <= 64 for n in numbers)
                 or not isinstance(sender_ids, list)
                 or not sender_ids
                 or any(not isinstance(item, str) or not item for item in sender_ids)
@@ -834,12 +856,22 @@ class _Planner:
                 # learn/store bit; it does not generalize DPT compatibility.
                 self.blocked.discard(address)
                 self.issues.pop(address, None)
-            self._add(
-                "scene",
-                _label(ga.get("name"), f"KNX Scene {number}"),
-                {"address": address, "scene_number": number},
-                "ets-sender-scene-parameter",
-            )
+            # One address, several numbers (REXLiTE ETS App 0.42.18): each scene
+            # is named in the address's comment, "1=name；2=name"; one the
+            # comment does not name takes the address's name and its number.
+            names = _scene_names(ga.get("comment"))
+            for number in sorted(numbers):
+                fallback = (
+                    _label(ga.get("name"), f"KNX Scene {number}")
+                    if len(numbers) == 1
+                    else f"{_label(ga.get('name'), 'KNX Scene')} {number}"
+                )
+                self._add(
+                    "scene",
+                    _label(names.get(number), fallback),
+                    {"address": address, "scene_number": number},
+                    "ets-sender-scene-parameter",
+                )
 
     def _add(self, platform: str, name: str, config: dict, source: str) -> None:
         addresses = sorted({v for k, v in config.items() if k.endswith("address")})

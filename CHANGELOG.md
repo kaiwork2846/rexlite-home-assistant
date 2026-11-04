@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.47
+
+- KNX：**一個情境位址、多個場景號**（現場做法；REXLiTE ETS App 0.42.18 起全戶情境鍵共用 `0/7/0`，每顆鍵一個場景號 1～64）：同一個位址上有多個已驗證的發送端、各自送不同的場景號時，**每個場景號一個 HA `scene`**（以前視為衝突、整個位址略過）。名稱讀位址的 Comment `1=1F-客廳 按鈕-1；2=客廳 回家`（App 寫的；用「；」分隔，因為 xknxproject 會吃掉換行）；Comment 沒寫到的號碼用「位址名稱 號碼」。HA 身分照舊是「位址＋場景號」。
+- 一顆鍵一個位址的舊專案輸出不變；`MAPPER_REVISION` 13 → 14（以前會略過的「同位址不同場景號」現在會對應出情境）。
+
 ## 0.1.46
 
 - KNX：乾接點窗簾（REXLiTE KNX Contract `CurtainImpulse`）的 cover 行程時間改讀 ETS：`上下` 位址的 Description 是「房間 · travel_down=18 travel_up=32」（REXLiTE ETS App 0.42.14 起由 SI 在 App 填、到現場量的秒數）時，`travelling_time_down`／`travelling_time_up` 就用這兩個數字。Description 沒有這段（舊專案）或秒數不在 3～300 之間，照舊兩個都 25 秒。只有乾接點窗簾讀 Description，其他實體不受影響。

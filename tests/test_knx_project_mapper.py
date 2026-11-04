@@ -865,6 +865,51 @@ class KNXProjectMappingTests(unittest.TestCase):
         group["scene_wall_key"] = "yes"
         self.assertEqual(mapper.plan_project(p)["entityCount"], 0)
 
+    def test_one_scene_address_with_a_number_per_wall_key(self):
+        # REXLiTE ETS App 0.42.18: every scene key of the home on 0/7/0, each
+        # with its own number, named in the address's comment.
+        group = ga("0/7/0", "情境", 18, 1)
+        group.update(
+            scene_numbers=[1, 2, 5],
+            scene_number_source="ets-sender-parameter",
+            scene_sender_ids=["key1", "key2", "key5"],
+            scene_wall_key=True,
+            comment="1=1F-客廳 按鈕-1；2=客廳 回家",
+        )
+        key = {
+            "group_address_links": ["0/7/0"],
+            "dpts": [{"main": 18, "sub": 1}],
+            "flags": {"communication": True, "transmit": True},
+        }
+        p = project(
+            group,
+            objects={name: copy.deepcopy(key) for name in ("key1", "key2", "key5")},
+        )
+        result = mapper.plan_project(p)
+        self.assertEqual(
+            sorted(
+                (s["address"], s["scene_number"], s["name"])
+                for s in result["config"]["scene"]
+            ),
+            [
+                ("0/7/0", 1, "1F-客廳 按鈕-1"),
+                ("0/7/0", 2, "客廳 回家"),
+                ("0/7/0", 5, "情境 5"),
+            ],
+        )
+        self.assertEqual(len({e["uniqueId"] for e in result["entities"]}), 3)
+        for broken in ([1, 1], [1, 65], [1, True], [], "1"):
+            bad = copy.deepcopy(p)
+            bad["group_addresses"]["0/7/0"]["scene_numbers"] = broken
+            self.assertEqual(mapper.plan_project(bad)["entityCount"], 0)
+
+    def test_scene_names_from_a_comment(self):
+        self.assertEqual(
+            mapper._scene_names("1=甲；2= 乙 ；x=丙；65=丁；3=；備註"),
+            {1: "甲", 2: "乙", 3: ""},
+        )
+        self.assertEqual(mapper._scene_names(None), {})
+
     def test_exact_conventions_map_five_entities_and_leave_scene_unresolved(self):
         result = mapper.plan_project(sample_conventions())
         self.assertEqual(result["entityCount"], 5)
