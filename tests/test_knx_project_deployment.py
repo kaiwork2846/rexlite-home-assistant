@@ -155,6 +155,9 @@ class IdentityTests(unittest.TestCase):
                 "3/0/1_3/0/2_3/0/3_None",
             ),
             ("scene", {"address": "4/0/1", "scene_number": 13}, "4/0/1_13"),
+            # HA keys a YAML fan by its speed address, else its switch address.
+            ("fan", {"address": "1/4/24", "switch_address": "1/4/20"}, "1/4/24"),
+            ("fan", {"switch_address": "1/4/20"}, "1/4/20"),
             # HA keys a YAML button by address and payload (default 1).
             ("button", {"address": "1/3/3"}, "1/3/3_1"),
             ("button", {"address": "1/3/4", "payload": 0}, "1/3/4_0"),

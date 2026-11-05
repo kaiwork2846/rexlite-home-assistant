@@ -17,7 +17,7 @@ from typing import Any
 
 MAX_GROUP_ADDRESSES = 65535
 MAX_ENTITIES = 2000
-MAPPER_REVISION = 14
+MAPPER_REVISION = 15
 
 # DPT 5.100 "fan stage": GVS BTPG air-conditioner gateways (REXLiTE ETS App
 # 0.35.0) and the HERA 7TS/3TS screens send 0 for auto and 1..4 for low,
@@ -25,6 +25,13 @@ MAPPER_REVISION = 14
 # "step" with 0 meaning auto, instead of the DPT 5.001 percentage.
 FAN_STAGE = (5, 100)
 FAN_STAGE_MODE = {"fan_speed_mode": "step", "fan_max_step": 4, "fan_zero_mode": "auto"}
+
+# DPT 5.010 "風量" of a ventilation fan with its own on/off (REXLiTE KNX Contract
+# HeatExchanger, ETS App 0.43.0: a Hitachi heat exchanger behind a GVS BTPG,
+# 1 weak, 2 strong, 3 rapid). HA's KNX fan: switch_address for on/off, address
+# for the step, max_step 3. Without a 風量 member it stays a switch.
+FAN_STEP = (5, 10)
+FAN_MAX_STEP = 3
 
 # role: (YAML field, allowed exact DPTs). Names here are semantic roles, not GA
 # names. Standard ETS roles include AbsoluteSetvalueControl/ActualDimmingValue.
@@ -59,6 +66,8 @@ ROLE_FIELDS = {
     "hvacmode": ("operation_mode_address", {(20, 102)}),
     "fanspeed": ("fan_speed_address", {(5, 1), FAN_STAGE}),
     "fanspeedstate": ("fan_speed_state_address", {(5, 1), FAN_STAGE}),
+    "fanstep": ("fan_step_address", {FAN_STEP}),
+    "fanstepstate": ("fan_step_state_address", {FAN_STEP}),
     "scene": ("address", {(17, 1), (18, 1)}),
     "impulseopen": ("open_impulse_address", {(1, 1)}),
     # The close impulse may also be declared 1.008 (Down = 1): no 7TS logic is spent
@@ -169,6 +178,8 @@ NAME_ROLES = {
     "模式": "controllermode",
     "風速狀態": "fanspeedstate",
     "風速": "fanspeed",
+    "風量狀態": "fanstepstate",
+    "風量": "fanstep",
 }
 
 # Standard ETS DatapointRoles that are real bus functions but never a Home
@@ -1037,6 +1048,16 @@ class _Planner:
                     self.issues.setdefault(address, "missing_explicit_scene_number")
                 self.blocked.update(mentioned)
                 return
+        elif "fan_step_address" in fields:
+            platform = "fan"
+            if "address" in fields:
+                fields["switch_address"] = fields.pop("address")
+            if "state_address" in fields:
+                fields["switch_state_address"] = fields.pop("state_address")
+            fields["address"] = fields.pop("fan_step_address")
+            if "fan_step_state_address" in fields:
+                fields["state_address"] = fields.pop("fan_step_state_address")
+            fields["max_step"] = FAN_MAX_STEP
         elif "address" in fields:
             platform = "light" if kind in LIGHT_TYPES else "switch"
             dimming = {"brightness_address", "color_temperature_address"}
@@ -1068,6 +1089,13 @@ class _Planner:
                 "color_temperature_mode",
             },
             "switch": {"address", "state_address"},
+            "fan": {
+                "address",
+                "state_address",
+                "switch_address",
+                "switch_state_address",
+                "max_step",
+            },
             "cover": {
                 "move_long_address",
                 "move_short_address",
