@@ -344,6 +344,9 @@ def row_identity(
         return f"{address}_{payload}" if address and payload is not None else None
     if platform in ("sensor", "binary_sensor"):
         return primary("state_address")
+    if platform == "fan":
+        # HA's YAML fan: the speed address, else the switch address.
+        return primary("address") or primary("switch_address")
     if platform == "cover":
         parts = (primary("move_long_address"), primary("position_address"))
     elif platform == "climate":
@@ -637,6 +640,7 @@ def manual_yaml_plan(source: str) -> dict:
         "binary_sensor",
         "cover",
         "climate",
+        "fan",
     }
     if not isinstance(config, dict) or not config or not set(config) <= platforms:
         raise DeploymentError("manual_yaml_platform_unsupported")

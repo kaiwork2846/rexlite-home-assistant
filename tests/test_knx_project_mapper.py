@@ -739,6 +739,53 @@ class KNXProjectMappingTests(unittest.TestCase):
         )
         self.assertEqual(result["skipped"], [])
 
+    def test_contract_heat_exchanger_is_a_fan_with_three_steps(self):
+        # REXLiTE ETS App 0.43.0: a Hitachi heat exchanger behind a GVS BTPG,
+        # on/off plus a DPT 5.010 airflow step (1 weak, 2 strong, 3 rapid).
+        name = "2F-客廳-全熱交換器"
+        p, table = contract_v1_project(
+            [
+                (
+                    "FT-10",
+                    name,
+                    [
+                        ("開關", (1, 1), "SwitchOnOff", False),
+                        ("狀態", (1, 1), "InfoOnOff", True),
+                        ("風量", (5, 10), "", False),
+                        ("風量狀態", (5, 10), "", True),
+                    ],
+                )
+            ]
+        )
+        result = mapper.plan_project(p)
+        self.assertNotIn("switch", result["config"])
+        fan = result["config"]["fan"][0]
+        self.assertEqual(fan["switch_address"], table[(name, "開關")])
+        self.assertEqual(fan["switch_state_address"], table[(name, "狀態")])
+        self.assertEqual(fan["address"], table[(name, "風量")])
+        self.assertEqual(fan["state_address"], table[(name, "風量狀態")])
+        self.assertEqual(fan["max_step"], 3)
+        self.assertEqual(result["skipped"], [])
+
+    def test_contract_heat_exchanger_without_airflow_stays_a_switch(self):
+        name = "2F-客廳-全熱交換器"
+        p, table = contract_v1_project(
+            [
+                (
+                    "FT-10",
+                    name,
+                    [
+                        ("開關", (1, 1), "SwitchOnOff", False),
+                        ("狀態", (1, 1), "InfoOnOff", True),
+                    ],
+                )
+            ]
+        )
+        result = mapper.plan_project(p)
+        self.assertNotIn("fan", result["config"])
+        switch = result["config"]["switch"][0]
+        self.assertEqual(switch["address"], table[(name, "開關")])
+
     def test_contract_aircon_percentage_fan_keeps_the_default_mode(self):
         p, _ = contract_v1_project(contract_aircon((5, 1), (5, 1)))
         climate = mapper.plan_project(p)["config"]["climate"][0]

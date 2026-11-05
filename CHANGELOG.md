@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.48
+
+- KNX：**全熱交換器 → HA `fan`**（REXLiTE KNX Contract `HeatExchanger`，ETS App 0.43.0：日立清淨型全熱交換器經 GVS BTPG）。Function 有 `開關`／`狀態`（SwitchOnOff／InfoOnOff）＋`{Function 名} 風量`／`風量狀態`（DPT 5.010，1 弱、2 強、3 急）時，輸出一個 KNX fan：`switch_address`／`switch_state_address`＝開關／狀態、`address`／`state_address`＝風量／風量狀態、`max_step: 3`。沒有風量的 Function 照舊是 switch。
+- 部署：fan 的 HA 身分照官方 YAML（風量位址，沒有就用開關位址）；手寫 YAML 也接受 `fan`。
+- `MAPPER_REVISION` 14 → 15（以前會略過的風量位址現在會對應；舊專案沒有風量，輸出不變）。
+
 ## 0.1.47
 
 - KNX：**一個情境位址、多個場景號**（現場做法；REXLiTE ETS App 0.42.18 起全戶情境鍵共用 `0/7/0`，每顆鍵一個場景號 1～64）：同一個位址上有多個已驗證的發送端、各自送不同的場景號時，**每個場景號一個 HA `scene`**（以前視為衝突、整個位址略過）。名稱讀位址的 Comment `1=1F-客廳 按鈕-1；2=客廳 回家`（App 寫的；用「；」分隔，因為 xknxproject 會吃掉換行）；Comment 沒寫到的號碼用「位址名稱 號碼」。HA 身分照舊是「位址＋場景號」。
