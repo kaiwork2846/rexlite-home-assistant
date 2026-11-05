@@ -786,6 +786,20 @@ class KNXProjectMappingTests(unittest.TestCase):
         switch = result["config"]["switch"][0]
         self.assertEqual(switch["address"], table[(name, "開關")])
 
+    def test_every_climate_setpoint_goes_16_to_30(self):
+        # REXLiTE 2026-11-05: 16..30 °C whatever the brand (the BTPG Daikin
+        # range), on a Contract air conditioner and on an installer dialect.
+        p, _ = contract_v1_project(contract_aircon((5, 100), (5, 100)))
+        contract = mapper.plan_project(p)["config"]["climate"][0]
+        p, _ = independent_units(
+            "13F-A12",
+            [("Climate-SW", 1, 1), ("Climate-MODE", 20, 105), *CLIMATE_TEMPERATURES],
+            count=1,
+        )
+        dialect = mapper.plan_project(p)["config"]["climate"][0]
+        for climate in (contract, dialect):
+            self.assertEqual((climate["min_temp"], climate["max_temp"]), (16, 30))
+
     def test_contract_aircon_percentage_fan_keeps_the_default_mode(self):
         p, _ = contract_v1_project(contract_aircon((5, 1), (5, 1)))
         climate = mapper.plan_project(p)["config"]["climate"][0]

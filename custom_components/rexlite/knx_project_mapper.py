@@ -17,7 +17,7 @@ from typing import Any
 
 MAX_GROUP_ADDRESSES = 65535
 MAX_ENTITIES = 2000
-MAPPER_REVISION = 15
+MAPPER_REVISION = 16
 
 # DPT 5.100 "fan stage": GVS BTPG air-conditioner gateways (REXLiTE ETS App
 # 0.35.0) and the HERA 7TS/3TS screens send 0 for auto and 1..4 for low,
@@ -25,6 +25,12 @@ MAPPER_REVISION = 15
 # "step" with 0 meaning auto, instead of the DPT 5.001 percentage.
 FAN_STAGE = (5, 100)
 FAN_STAGE_MODE = {"fan_speed_mode": "step", "fan_max_step": 4, "fan_zero_mode": "auto"}
+
+# Every air conditioner's setpoint goes 16..30 °C, whatever the brand (REXLiTE,
+# 2026-11-05): the GVS BTPG Daikin protocol fixes that range (read-only in ETS),
+# so the HERA 7TS/3TS screens (ETS App 0.43.1) and HA keep to it as well.
+# HA's KNX climate default is 7..35.
+CLIMATE_SETPOINT_RANGE = {"min_temp": 16, "max_temp": 30}
 
 # DPT 5.010 "風量" of a ventilation fan with its own on/off (REXLiTE KNX Contract
 # HeatExchanger, ETS App 0.43.0: a Hitachi heat exchanger behind a GVS BTPG,
@@ -899,6 +905,8 @@ class _Planner:
         if platform == "scene":
             identity += f"|{config['scene_number']}"
         unique_id = "rexlite_ets_" + hashlib.sha256(identity.encode()).hexdigest()[:24]
+        if platform == "climate":
+            config = {**config, **CLIMATE_SETPOINT_RANGE}
         self.candidates.append(
             {
                 "platform": platform,

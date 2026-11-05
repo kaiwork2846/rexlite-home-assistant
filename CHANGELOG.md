@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.49
+
+- KNX：**冷氣設定溫度一律 16～30 °C**（不分品牌）：每個 HA `climate` 都帶 `min_temp: 16`、`max_temp: 30`（HA KNX climate 預設 7～35）。GVS BTPG 大金協定在 ETS 把範圍鎖死 16～30（唯讀），HERA 7TS／3TS 畫面（REXLiTE ETS App 0.43.1）與 HA 跟著一致；日立（Modbus）閘道本身不限，靠面板與 HA 擋。
+- `MAPPER_REVISION` 15 → 16（每個 climate 多兩個欄位；HA 身分不變，升版後重新部署即可）。
+
 ## 0.1.48
 
 - KNX：**全熱交換器 → HA `fan`**（REXLiTE KNX Contract `HeatExchanger`，ETS App 0.43.0：日立清淨型全熱交換器經 GVS BTPG）。Function 有 `開關`／`狀態`（SwitchOnOff／InfoOnOff）＋`{Function 名} 風量`／`風量狀態`（DPT 5.010，1 弱、2 強、3 急）時，輸出一個 KNX fan：`switch_address`／`switch_state_address`＝開關／狀態、`address`／`state_address`＝風量／風量狀態、`max_step: 3`。沒有風量的 Function 照舊是 switch。
