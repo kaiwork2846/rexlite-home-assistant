@@ -1358,6 +1358,36 @@ class KNXProjectMappingTests(unittest.TestCase):
                     result["skipped"],
                 )
 
+    def test_impulse_curtain_without_close_impulse_is_still_one_cover(self):
+        # ETS App 0.43.8 (SI feedback 2026-11-06): the actuator's close channel
+        # listens to the up/down address itself, so new projects have no
+        # separate close impulse address. Open + stop impulses with both wall
+        # addresses are still one cover.
+        p, table = contract_v1_project()
+        close = table[("2F-主臥-窗簾1", "關脈衝")]
+        function = next(
+            f for f in p["functions"].values() if f["name"] == "2F-主臥-窗簾1"
+        )
+        del function["group_addresses"][close]
+        del p["group_addresses"][close]
+        for obj in p["communication_objects"].values():
+            links = obj.get("group_address_links", [])
+            if close in links:
+                links.remove(close)
+        result = mapper.plan_project(p)
+        cover = {row["name"]: row for row in result["config"]["cover"]}["2F-主臥-窗簾1"]
+        self.assertEqual(cover["move_long_address"], table[("2F-主臥-窗簾1", "上下")])
+        self.assertEqual(cover["stop_address"], table[("2F-主臥-窗簾1", "停止")])
+        self.assertNotIn("button", result["config"])
+        for suffix in ("開脈衝", "停脈衝"):
+            self.assertIn(
+                {
+                    "address": table[("2F-主臥-窗簾1", suffix)],
+                    "reason": "function_role_not_exposed",
+                },
+                result["skipped"],
+            )
+
     def test_partial_impulse_curtain_is_rejected_not_guessed(self):
         p, table = contract_v1_project()
         stop = table[("2F-主臥-窗簾1", "停脈衝")]

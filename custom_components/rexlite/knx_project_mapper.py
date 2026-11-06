@@ -104,6 +104,13 @@ IMPULSE_BUTTONS = {
 # Without them (projects from before contract 2026-10-02) it stays three buttons.
 IMPULSE_WALL_BUTTON_FIELDS = {"move_long_address", "move_short_address"}
 
+# The impulses such a cover needs besides its wall-button addresses. The close
+# impulse is not one of them (REXLiTE ETS App 0.43.8, SI feedback 2026-11-06):
+# the actuator's close channel listens to the up/down address itself, so the
+# separate close impulse address nothing ever sent to is gone from new projects.
+# Older projects still have it, and it is still not exposed.
+IMPULSE_COVER_IMPULSES = {"open_impulse_address", "stop_impulse_address"}
+
 # The dry-contact cover: no position feedback, so a blind run for a fixed time
 # each way (the field's template, ipc-dev-1 2026-11-03).
 IMPULSE_COVER = {
@@ -979,8 +986,9 @@ class _Planner:
                 field: fields.pop(field)
                 for field in sorted(fields.keys() & IMPULSE_WALL_BUTTON_FIELDS)
             }
-            if fields.keys() == IMPULSE_BUTTONS.keys() and wall.keys() == (
-                IMPULSE_WALL_BUTTON_FIELDS
+            if (
+                IMPULSE_COVER_IMPULSES <= fields.keys() <= IMPULSE_BUTTONS.keys()
+                and wall.keys() == IMPULSE_WALL_BUTTON_FIELDS
             ):
                 for address in fields.values():
                     self.non_entity_members.add(address)

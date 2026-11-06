@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.50
+
+- KNX：乾接點窗簾（REXLiTE KNX Contract `CurtainImpulse`）**沒有 `關脈衝` 也是一個 `cover`**（REXLiTE ETS App 0.43.8，SI 回饋 2026-11-06）：執行器的「關」通道本來就聽 `上下` 位址（下＝1），另外的關脈衝位址從沒有人送過，新專案不再建立。有 `開脈衝`＋`停脈衝`＋牆面按鍵位址（`上下`、`停止`）就輸出 cover，`開脈衝`／`停脈衝`列 `function_role_not_exposed`。舊專案（有 `關脈衝`）輸出不變。
+- `MAPPER_REVISION` 不變（仍是 16）：舊專案的輸出一模一樣；少了關脈衝的新 `.knxproj` 本來就是新的專案指紋。
+
 ## 0.1.49
 
 - KNX：**冷氣設定溫度一律 16～30 °C**（不分品牌）：每個 HA `climate` 都帶 `min_temp: 16`、`max_temp: 30`（HA KNX climate 預設 7～35）。GVS BTPG 大金協定在 ETS 把範圍鎖死 16～30（唯讀），HERA 7TS／3TS 畫面（REXLiTE ETS App 0.43.1）與 HA 跟著一致；日立（Modbus）閘道本身不限，靠面板與 HA 擋。
